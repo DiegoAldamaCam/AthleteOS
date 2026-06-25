@@ -47,9 +47,9 @@ Chain strategy: pending
 
 ## Phase 4: Canonicalize Job (deps: 2.x, L ~6d)
 
-- [ ] 4.1 Create `jobs/canonicalize/main.py`: KafkaSource(raw.strength, JSON) → key_by(athlete_id) → transform → KafkaSink(canonical.training_event, ConfluentRegistryAvroSerializationSchema); WatermarkStrategy 24h bounded out-of-orderness; dedup ValueState<bool> per event_id, 7d TTL
-- [ ] 4.2 DLQ side output: OutputTag("dlq") for VALIDATION_FAILURE + TRANSFORM_ERROR → JSON KafkaSink(AT_LEAST_ONCE) to `dlq.canonical.training_event`; error envelope per spec (original_value base64, error_type, stack)
-- [ ] 4.3 Integration test (HIGHEST RISK): raw JSON → canonical Avro roundtrip via Schema Registry + DLQ routing on invalid input + dedup drops duplicate event_ids (testcontainers Kafka + Schema Registry)
+- [x] 4.1 Create `jobs/canonicalize/main.py`: KafkaSource(raw.strength, JSON) → key_by(athlete_id) → transform → KafkaSink(canonical.training_event, ConfluentRegistryAvroSerializationSchema); WatermarkStrategy 24h bounded out-of-orderness; dedup ValueState<bool> per event_id, 7d TTL
+- [x] 4.2 DLQ side output: OutputTag("dlq") for VALIDATION_FAILURE + TRANSFORM_ERROR → JSON KafkaSink(AT_LEAST_ONCE) to `dlq.canonical.training_event`; error envelope per spec (original_value base64, error_type, stack)
+- [x] 4.3 Integration test (HIGHEST RISK): raw JSON → canonical Avro roundtrip via Schema Registry + DLQ routing on invalid input + dedup drops duplicate event_ids (testcontainers Kafka + Schema Registry)
 
 ## Phase 5: Metrics Job (deps: 4.x, L ~8d)
 
