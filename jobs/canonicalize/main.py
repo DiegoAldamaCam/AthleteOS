@@ -1,7 +1,7 @@
 """PyFlink canonicalize job wiring (PR3, task 4.1/4.2).
 
 Import-isolation contract
-========================
+=======================
 apache-flink has no wheel for CPython 3.14 (grpcio-tools / apache-beam build
 fails). To keep the package importable and `pytest --collect-only` working,
 **all pyflink imports are LAZY** -- they live inside ``run()`` / ``build_job()``
@@ -13,29 +13,45 @@ The integration slice (tests/integration/test_canonicalize_job.py) exercises
 this wiring end-to-end when apache-flink IS installed and Docker is up; it
 SKIPS cleanly otherwise (never fakes a pass).
 
+PyFlink API reality (Flink 1.19, verified via Context7)
+=======================================================
+The Confluent-Registry Avro serde has NO DataStream-facing API in PyFlink
+(``pyflink.datastream.formats.avro.ConfluentRegistryAvroSerializationSchema``
+does NOT exist; it is a Java-only API). The Confluent-Registry Avro wire format
+IS reachable through the **Table/SQL** connector via ``'value.format' =
+'avro-confluent'`` + ``'value.avro-confluent.url'`` -- which is the cleanest
+real path. Hence the canonical sink is wired through a
+``StreamTableEnvironment`` DDL'd Kafka table whose value uses the
+``avro-confluent`` format, and the canonical Row DataStream is lifted into that
+table via ``tbl_env.from_data_stream(transformed)`` +
+``table.execute_insert(...)``.
+
+KeyedProcessFunction in PyFlink emits via ``yield``: the Java
+``process_element(value, ctx, Collector)`` signature does NOT apply on the
+Python side. PyFlink's signature is ``process_element(self, value, ctx)``
+(yield main payload, ``yield output_tag, payload`` for side output), and the
+main-stream type MUST be passed as ``output_type=...`` to ``.process(...)``.
+
 Job topology (design.md)
-========================
+=======================
 raw -> canonical training event, strength-sourced slice:
 
     KafkaSource(raw.strength, SimpleStringSchema-JSON)
       .assign_watermark(WatermarkStrategy.for_bounded_out_of_orderness(24h)
-                        .with_timestamp_assigner(event -> event_time epoch-ms))
+                        .with_timestamp_assigner(_EventTimeAssigner()))
+        # _EventTimeAssigner parses JSON -> event_time (ISO) -> epoch-ms long
+        # so windows are over event_time, NOT ingest_time (spec line ~29).
       -> key_by(event_id)                 # dedup keyed by event_id (LOCKED)
-      -> CanonicalizeProcessFunction:     # KeyedProcessFunction
-          ValueState<bool> seen(event_id), StateTtlConfig 7d
-          (OnCreateAndWrite + NeverReturnExpired)
-          on first-seen event_id:
-            json.loads(raw) -> transform_strength_to_canonical(...) -> validate
-            emit canonical Row (main output) -- on ValidationError/TransformError
-            ctx.output(DLQ_TAG, build_dlq_envelope(...))   (side output)
-      -> key_by(athlete_id)               # Kafka record key = co-partitioning
-      -> KafkaSink(canonical.training_event,
-                   ConfluentRegistryAvroSerializationSchema(Registry URL),
-                   key=athlete_id, DeliveryGuarantee.EXACTLY_ONCE)
-
-      (main.split.side_output(DLQ_TAG))
-      == DLQ stream -> KafkaSink(dlq.canonical.training_event, JSON,
-                                 DeliveryGuarantee.AT_LEAST_ONCE)
+      -> .process(CanonicalizeProcessFunction, output_type=canonical_row_type)
+        # KeyedProcessFunction: ValueState<bool> seen(event_id), StateTtlConfig
+        # 7d (OnCreateAndWrite + NeverReturnExpired). Emits via ``yield``:
+        #   -> main:  yield Row(... canonical TrainingEvent ...)
+        #   -> side:  yield dlq_tag, json.dumps(build_dlq_envelope(...))
+      [main stream] -> StreamTableEnvironment.from_data_stream(table)
+                     -> Kafka-sink table (avro-confluent value, RAW athlete_id
+                        key, DeliveryGuarantee.EXACTLY_ONCE) [Table API]
+      [side DLQ  ]   -> KafkaSink(dlq.canonical.training_event, JSON string,
+                                  DeliveryGuarantee.AT_LEAST_ONCE) [DataStream]
 
 Refs the event-contracts spec:
   - Common Event Envelope: epoch-ms longs, schema_version REQUIRED (added here).
@@ -120,41 +136,68 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
 
     All pyflink imports are INSIDE this function so the module imports cleanly on
     interpreters without apache-flink. Executed only on a flink-capable runtime.
+
+    PyFlink reality (Flink 1.19, verified via Context7):
+      - The Confluent-Registry Avro serde is reachable ONLY through the Table
+        / SQL connector ('value.format'='avro-confluent'), NOT through any
+        DataStream-facing API (the prior
+        ``ConfluentRegistryAvroSerializationSchema`` import was a Java-only
+        fiction). The canonical sink is therefore wired via a StreamTableEnvironment.
+      - ``KeyedProcessFunction.process_element`` has the signature
+        ``(self, value, ctx)`` and emits via ``yield`` (and
+        ``yield output_tag, payload`` for side output); the Java Collector
+        does NOT exist on the Python side. ``.process(func, output_type=...)``
+        MUST be given the main-stream type.
     """
     # --- pyflink imports (deferred) -----------------------------------------
-    from pyflink.common import Duration, Types, WatermarkStrategy
+    from pyflink.common import (
+        Duration,
+        Row,
+        TimestampAssigner,
+        Types,
+        WatermarkStrategy,
+    )
     from pyflink.common.serialization import SimpleStringSchema
     from pyflink.datastream import (
+        OutputTag,
         StreamExecutionEnvironment,
         RuntimeExecutionMode,
     )
     from pyflink.datastream.connectors.kafka import (
-        KafkaSource,
-        KafkaSink,
-        KafkaOffsetsInitializer,
         DeliveryGuarantee,
+        KafkaOffsetsInitializer,
         KafkaRecordSerializationSchema,
+        KafkaSink,
+        KafkaSource,
     )
     from pyflink.datastream.functions import KeyedProcessFunction
-    from pyflink.datastream.state import ValueStateDescriptor, StateTtlConfig
-    from pyflink.datastream import OutputTag
-    from pyflink.datastream.formats.avro import ConfluentRegistryAvroSerializationSchema
-    from pyflink.datastream.formats.json import JsonRowSerializationSchema
+    from pyflink.datastream.state import StateTtlConfig, ValueStateDescriptor
+    from pyflink.table import (
+        EnvironmentSettings,
+        StreamTableEnvironment,
+    )
 
     from jobs.canonicalize.transform import (
+        build_dlq_envelope,
+        select_dlq_error_type,
         transform_strength_to_canonical,
         validate_training_event,
-        build_dlq_envelope,
-        ValidationError,
+        parse_iso_to_epoch_ms,
         TransformError,
-        VALIDATION_FAILURE,
-        TRANSFORM_ERROR,
+        ValidationError,
     )
 
     # --- environment --------------------------------------------------------
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_runtime_mode(RuntimeExecutionMode.STREAMING)
     env.enable_checkpointing(config.checkpoint_interval_ms)
+
+    # StreamTableEnvironment wraps the same DataStream env so the canonical
+    # Avro-Confluent sink (Table API) and the DLQ KafkaSink (DataStream API)
+    # run as ONE submitted job. (avro-confluent is the only real PyFlink path
+    # to the Confluent Registry Avro serde; there is no DataStream equivalent.)
+    table_settings = EnvironmentSettings.new_instance().in_streaming_mode().build()
+    tbl_env = StreamTableEnvironment.create(env, settings=table_settings)
 
     schema_version = config.effective_schema_version()
 
@@ -172,8 +215,41 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
         .build()
     )
 
-    watermark = WatermarkStrategy.for_bounded_out_of_orderness(
-        Duration.of_hours(WATERMARK_OUT_OF_ORDER_HOURS)
+    # Event-time assigner: parses event_time (ISO-8601 string) out of the raw
+    # JSON envelope and converts it to epoch-ms so downstream event-time
+    # windows run over event_time, NOT ingest_time (spec line ~29
+    # "Event-time ordering"). The Kafka source delivers raw envelopes as JSON
+    # strings via SimpleStringSchema; the timestamp assigner therefore MUST
+    # json.loads the value here. NO assigner can live at the Kafka-source level
+    # (event_time only exists inside the parsed JSON).
+    #
+    # The assigner must never raise: malformed JSON / missing event_time here
+    # is silently forwarded with its prior timestamp -- the canonicalize
+    # ProcessFunction downstream catches those records and routes them to the
+    # DLQ via select_dlq_error_type. NAIVE-UTC equivalence with
+    # transform.parse_iso_to_epoch_ms is preserved.
+    class _EventTimeAssigner(TimestampAssigner):  # type: ignore[misc]
+        def extract_timestamp(self, value: str, record_timestamp: int) -> int:
+            try:
+                envelope = json.loads(value)
+                iso = (
+                    envelope.get("event_time")
+                    if isinstance(envelope, dict)
+                    else None
+                )
+            except (TypeError, ValueError):
+                return record_timestamp
+            if not isinstance(iso, str) or iso == "":
+                return record_timestamp
+            try:
+                return parse_iso_to_epoch_ms(iso)
+            except TransformError:
+                return record_timestamp
+
+    watermark = (
+        WatermarkStrategy.for_bounded_out_of_orderness(
+            Duration.of_hours(WATERMARK_OUT_OF_ORDER_HOURS)
+        ).with_timestamp_assigner(_EventTimeAssigner())
     )
 
     raw_stream = env.from_source(
@@ -182,14 +258,15 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
         source_name=SOURCE_NAME,
     )
 
-    # Canonical Row type matches the TrainingEvent Avro schema.
+    # Canonical Row field layout (order matches schemas/canonical/TrainingEvent.avsc).
+    canonical_field_names = (
+        "event_id", "event_time", "ingest_time", "source", "schema_version",
+        "athlete_id", "event_type", "workout_id", "exercise_id", "set_number",
+        "reps", "weight_kg", "rpe", "rir", "activity_type", "distance_km",
+        "duration_sec", "avg_hr", "tss", "session_load",
+    )
     canonical_row_type = Types.ROW_NAMED(
-        [
-            "event_id", "event_time", "ingest_time", "source", "schema_version",
-            "athlete_id", "event_type", "workout_id", "exercise_id", "set_number",
-            "reps", "weight_kg", "rpe", "rir", "activity_type", "distance_km",
-            "duration_sec", "avg_hr", "tss", "session_load",
-        ],
+        list(canonical_field_names),
         [
             Types.STRING(), Types.LONG(), Types.LONG(), Types.STRING(), Types.INT(),
             Types.STRING(), Types.STRING(),
@@ -204,12 +281,21 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
         """Dedup (ValueState<bool> per event_id, 7d TTL) + transform + validate.
 
         Keyed by ``event_id`` (LOCKED: growth bounded to the 7d re-delivery
-        window). First-seen -> transform+validate+emit canonical Row; duplicate
-        -> dropped. ValidationError / TransformError -> DLQ side output.
+        window). First-seen -> transform+validate+``yield`` canonical Row;
+        duplicate -> dropped. ValidationError / TransformError -> DLQ side
+        output via ``yield dlq_tag, payload``.
+
+        PyFlink KeyedProcessFunction emits via ``yield``; the Java Collector
+        signature ``process_element(value, ctx, Collector)`` does NOT exist on
+        the Python side (CRITICAL-1 fix).
         """
 
-        def __init__(self, row_type: Any, schema_version: int) -> None:
-            self._row_type = row_type
+        def __init__(
+            self,
+            field_names: tuple[str, ...],
+            schema_version: int,
+        ) -> None:
+            self._field_names = field_names
             self._schema_version = schema_version
 
         def open(self, runtime_context: Any) -> None:  # noqa: D401
@@ -225,71 +311,66 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
             )
             self._seen.enable_time_to_live(ttl)
 
-        def process_element(self, value: str, ctx: Any, out: Any) -> None:
+        def process_element(self, value: str, ctx: Any) -> None:
             # Dedup: ValueState<bool> keyed by event_id
             if bool(self._seen.value()):
                 return  # duplicate inside the 7d re-delivery window -> dropped
             original_value = value
             try:
                 raw = json.loads(value)
-            except (TypeError, ValueError):
-                ctx.output(
-                    dlq_tag,
-                    json.dumps(
-                        build_dlq_envelope(
-                            original_topic=config.raw_topic,
-                            original_key=None,
-                            original_value=original_value,
-                            error_type=TRANSFORM_ERROR,
-                            error_message="raw value is not valid JSON",
-                            timestamp=_epoch_ms_now(),
-                        )
-                    ),
+            except (TypeError, ValueError) as json_exc:
+                # Malformed raw JSON: raise-and-classify so the same
+                # pure helper (select_dlq_error_type) picks the DLQ error_type.
+                err = TransformError(f"raw value is not valid JSON: {json_exc}")
+                yield dlq_tag, json.dumps(
+                    build_dlq_envelope(
+                        original_topic=config.raw_topic,
+                        original_key=None,
+                        original_value=original_value,
+                        error_type=select_dlq_error_type(err),
+                        error_message=str(err),
+                        timestamp=_epoch_ms_now(),
+                    )
                 )
                 return
 
-            event_id = raw.get("event_id") if isinstance(raw, dict) else None
             athlete_id = raw.get("athlete_id") if isinstance(raw, dict) else None
             try:
                 canonical = transform_strength_to_canonical(raw, self._schema_version)
                 validate_training_event(canonical)
             except (ValidationError, TransformError) as exc:
                 self._seen.update(True)  # mark to avoid re-routing the same bad event
-                ctx.output(
-                    dlq_tag,
-                    json.dumps(
-                        build_dlq_envelope(
-                            original_topic=config.raw_topic,
-                            original_key=athlete_id,
-                            original_value=original_value,
-                            error_type=(
-                                VALIDATION_FAILURE
-                                if isinstance(exc, ValidationError)
-                                else TRANSFORM_ERROR
-                            ),
-                            error_message=str(exc),
-                            timestamp=_epoch_ms_now(),
-                        )
-                    ),
+                yield dlq_tag, json.dumps(
+                    build_dlq_envelope(
+                        original_topic=config.raw_topic,
+                        original_key=athlete_id,
+                        original_value=original_value,
+                        error_type=select_dlq_error_type(exc),
+                        error_message=str(exc),
+                        timestamp=_epoch_ms_now(),
+                    )
                 )
                 return
 
             # Mark seen and emit canonical Row (order: mark first for exactly-once).
             self._seen.update(True)
-            from pyflink.common import Row
-            out.collect(Row(*[canonical[f] for f in self._row_type._field_names]))
+            yield Row(*[canonical[f] for f in self._field_names])
 
     # --- transform pipeline -------------------------------------------------
+    # PyFlink .process(...) REQUIRES output_type= for the main stream type
+    # (CRITICAL-1 fix); without it the runtime cannot infer the produced type.
     transformed = (
         raw_stream
         .key_by(lambda raw: json.loads(raw).get("event_id") or "")
-        .process(CanonicalizeProcessFunction(canonical_row_type, schema_version))
+        .process(
+            CanonicalizeProcessFunction(canonical_field_names, schema_version),
+            output_type=canonical_row_type,
+        )
     )
 
     # DLQ side output -> JSON KafkaSink (AT_LEAST_ONCE per design ADR-12).
-    dlq_stream = transformed.get_side_output(dlq_tag) if hasattr(
-        transformed, "get_side_output"
-    ) else transformed.get_side_output(dlq_tag)
+    # (Straight call; the prior tautological identical-branch ternary removed.)
+    dlq_stream = transformed.get_side_output(dlq_tag)
 
     dlq_sink = (
         KafkaSink.builder()
@@ -305,28 +386,72 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
     )
     dlq_stream.sink_to(dlq_sink)
 
-    # Canonical main stream: re-key by athlete_id (Kafka record key = co-partitioning)
-    # and sink to canonical.training_event with the Confluent Registry Avro serde.
-    avro_value_schema = ConfluentRegistryAvroSerializationSchema.for_value(
-        schema_registry_url=config.schema_registry_url,
-        type_info=canonical_row_type,
-    )
+    # --- canonical main stream: Avro-Confluent sink via the Table API --------
+    # BLOCKER-1 fix: the Confluent-Registry Avro serde is ONLY reachable in
+    # PyFlink 1.19 through the Table/SQL connector ('value.format' =
+    # 'avro-confluent'); there is no DataStream ConfluentRegistryAvro*
+    # serialization schema. We DDL a 'connector'='kafka' sink table whose value
+    # uses 'avro-confluent' against the Confluent Schema Registry, with a RAW
+    # athlete_id key for co-partitioning (design: Kafka record key = athlete_id).
+    #
+    # value.fields-include defaults to ALL -> athlete_id is ALSO present in the
+    # Avro value, matching the registered TrainingEvent.avsc schema (which
+    # lists athlete_id as a required field).
+    #
+    # The kafka connector's EXACTLY_ONCE delivery requires a transactional-id
+    # prefix (spec: canonical sink is EXACTLY_ONCE; DLQ is AT_LEAST_ONCE).
+    sink_ddl = f"""
+CREATE TABLE canonical_training_event_sink (
+  `event_id` STRING,
+  `event_time` BIGINT,
+  `ingest_time` BIGINT,
+  `source` STRING,
+  `schema_version` INT,
+  `athlete_id` STRING,
+  `event_type` STRING,
+  `workout_id` STRING,
+  `exercise_id` STRING,
+  `set_number` INT,
+  `reps` INT,
+  `weight_kg` FLOAT,
+  `rpe` FLOAT,
+  `rir` FLOAT,
+  `activity_type` STRING,
+  `distance_km` FLOAT,
+  `duration_sec` INT,
+  `avg_hr` INT,
+  `tss` FLOAT,
+  `session_load` FLOAT
+) WITH (
+  'connector' = 'kafka',
+  'topic' = '{config.canonical_topic}',
+  'properties.bootstrap.servers' = '{config.bootstrap_servers}',
+  -- Kafka record key = athlete_id (RAW UTF-8) for co-partitioning with
+  -- downstream athlete-keyed windows (design: "Kafka record key =
+  -- athlete_id"). value.fields-include defaults to ALL (athlete_id is
+  -- ALSO in the Avro value -- matches the registered TrainingEvent.avsc).
+  'key.format' = 'raw',
+  'key.fields' = 'athlete_id',
+  -- Confluent-Registry Avro value serde (BLOCKER-1 fix: this is the real,
+  -- documented Flink 1.19 PyFlink path -- no DataStream equivalent exists).
+  'value.format' = 'avro-confluent',
+  'value.avro-confluent.url' = '{config.schema_registry_url}',
+  -- Spec: canonical sink MUST be EXACTLY_ONCE (DLQ is AT_LEAST_ONCE).
+  -- EXACTLY_ONCE on the kafka connector REQUIRES the transactional-id prefix.
+  'sink.delivery-guarantee' = 'exactly-once',
+  'sink.transactional-id-prefix' = 'athleteos-canonicalize-training-event'
+)
+"""
+    tbl_env.execute_sql(sink_ddl)
 
-    canonical_sink = (
-        KafkaSink.builder()
-        .set_bootstrap_servers(config.bootstrap_servers)
-        .set_record_serializer(
-            KafkaRecordSerializationSchema.builder()
-            .set_topic(config.canonical_topic)
-            .set_value_serialization_schema(avro_value_schema)
-            .build()
-        )
-        .set_delivery_guarantee(DeliveryGuarantee.EXACTLY_ONCE)
-        .build()
-    )
-    transformed.key_by(lambda row: row.athlete_id).sink_to(canonical_sink)
-
-    env.execute("athleteos-canonicalize-job")
+    # Lift the canonical Row DataStream (its Types.ROW_NAMED carries the named
+    # field names) into a Table and INSERT into the Avro-Confluent sink.
+    # `execute_insert` submits the FULL DAG (canonical Table sink + DLQ
+    # DataStream sink) against the StreamExecutionEnvironment; no separate
+    # env.execute() call is needed (mixing DataStream + Table API per the
+    # documented PyFlink pattern).
+    canonical_table = tbl_env.from_data_stream(transformed)
+    canonical_table.execute_insert("canonical_training_event_sink")
 
 
 def main() -> int:  # pragma: no cover - entrypoint

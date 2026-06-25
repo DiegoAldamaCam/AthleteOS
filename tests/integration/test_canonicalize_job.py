@@ -2,9 +2,19 @@
 + DLQ routing + dedup, against testcontainers Kafka + Schema Registry.
 
 HIGHEST RISK in the whole change: this exercises the PyFlink job wiring
-(KafkaSource/KafkaSink, ConfluentRegistryAvroSerializationSchema, watermark,
-dedup ValueState + StateTtlConfig, OutputTag side output) against a real broker
-and a real Confluent-compatible Schema Registry.
+(KafkaSource/KafkaSink, the Table API ``avro-confluent`` value format for the
+canonical sink, the watermark TimestampAssigner, the KeyedProcessFunction
+yield-based process_element with ValueState dedup + StateTtlConfig, and the
+OutputTag side output for the DLQ KafkaSink) against a real broker and a real
+Confluent-compatible Schema Registry.
+
+Note on the Avro-Confluent serde path: PyFlink 1.19 has NO DataStream-facing
+Confluent-Registry Avro serializer (that is a Java-only API). The canonical
+sink is therefore wired via a StreamTableEnvironment DDL'd kafka table with
+``'value.format' = 'avro-confluent'`` + ``'value.avro-confluent.url'``; the
+canonical Row DataStream is lifted into that table via
+``tbl_env.from_data_stream(stream)`` + ``table.execute_insert(...)``. This test
+exercises that path end-to-end when a flink-capable runtime + Docker are up.
 
 Gating (skips cleanly, never fakes a pass):
   - Docker daemon reachable (testcontainers redpanda fixture); else skip.
