@@ -446,12 +446,40 @@ CREATE TABLE canonical_training_event_sink (
 
     # Lift the canonical Row DataStream (its Types.ROW_NAMED carries the named
     # field names) into a Table and INSERT into the Avro-Confluent sink.
-    # `execute_insert` submits the FULL DAG (canonical Table sink + DLQ
-    # DataStream sink) against the StreamExecutionEnvironment; no separate
-    # env.execute() call is needed (mixing DataStream + Table API per the
-    # documented PyFlink pattern).
+    #
+    # Note: ``from_data_stream`` does NOT propagate a rowtime/watermark Schema
+    # across the Table boundary. That is fine here -- the watermark is for the
+    # source-side event-time pipeline (dedup/KeyedProcessFunction); the
+    # canonical Kafka sink is append-only by field-name mapping, so no
+    # rowtime Schema is required for the sink to work.
+    #
+    # Single-submission wiring (Flink 1.19 PyFlink, verified via Context7):
+    # ``Table.execute_insert(...)`` submits ONLY the Table pipeline -- any
+    # DataStream sinks on the SAME env (here: ``dlq_stream.sink_to(dlq_sink)``)
+    # would be ORPHANED and never executed, silently dropping DLQ traffic and
+    # breaking the spec DLQ requirement. Instead we add the Table insert to a
+    # StatementSet, fold the Table pipeline into the DataStream DAG via
+    # ``attach_as_datastream()`` (the statement set is cleared afterwards),
+    # then submit the whole job ONCE with ``env.execute(...)``. The DLQ sink
+    # is already attached to this same ``env``, so the single
+    # ``env.execute()`` submits BOTH the canonical Avro-Confluent Table sink
+    # AND the DLQ JSON DataStream sink as one Flink job.
+    #
+    # API names/signatures confirmed via Context7 (Flink 1.19 docs):
+    #   - ``StreamTableEnvironment.create_statement_set() -> StatementSet``
+    #   - ``StatementSet.add_insert(target_path: str, table: Table) -> StatementSet``
+    #     (target_path = registered sink-table name from the DDL above)
+    #   - ``StatementSet.attach_as_datastream()`` -- adds the Table pipeline as
+    #     transformations to the StreamExecutionEnvironment; use ``env.execute()``
+    #     to submit them (NOT the statement set).
     canonical_table = tbl_env.from_data_stream(transformed)
-    canonical_table.execute_insert("canonical_training_event_sink")
+    statement_set = tbl_env.create_statement_set()
+    statement_set.add_insert("canonical_training_event_sink", canonical_table)
+    statement_set.attach_as_datastream()
+
+    # Submit the full DAG (canonical Avro-Confluent Table sink + DLQ JSON
+    # DataStream sink) as a single Flink job.
+    env.execute("athleteos-canonicalize-job")
 
 
 def main() -> int:  # pragma: no cover - entrypoint

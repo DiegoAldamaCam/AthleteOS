@@ -350,10 +350,12 @@ def build_dlq_envelope(
 
 # --- Avro helpers (fastavro, stand-in for Confluent Registry Avro serde) ----
 # Pure roundtrip used by the unit tests to prove the canonical dict is
-# type/default coherent with TrainingEvent.avsc. The Flink job uses
-# ConfluentRegistryAvroSerializationSchema against the SAME .avsc via the
-# Registry; fastavro is a faithful local stand-in for unit-level verification
-# (no pyflink/Docker required).
+# type/default coherent with TrainingEvent.avsc. The Flink job writes the
+# canonical TrainingEvent to a Table/SQL Kafka sink whose 'value.format' =
+# 'avro-confluent' resolves the Avro schema from the Confluent Schema
+# Registry (no DataStream-facing ConfluentRegistryAvro* serde exists in
+# PyFlink 1.19); fastavro is a faithful local stand-in for unit-level
+# field-type verification (no pyflink/Docker required).
 
 
 _SCHEMA_DIR = Path(__file__).resolve().parent.parent.parent / "schemas" / "canonical"
@@ -370,11 +372,12 @@ def load_training_event_avsc() -> dict:
 def serialize_training_event_avro(event: dict, schema: dict) -> bytes:
     """Serialize a canonical TrainingEvent dict to Avro bytes (fastavro).
 
-    The Flink job uses ConfluentRegistryAvroSerializationSchema (wire format
-    embeds a 5-byte schema-id header per the Confluent wire format); this helper
-    emits bare Avro (no Confluent header) which is sufficient for unit-level
-    field-type/default verification. The integration test exercises the real
-    Registry serde.
+    The Flink job writes canonical TrainingEvents to a Table sink with
+    'value.format'='avro-confluent' (the Confluent wire format embeds a
+    5-byte schema-id header per the Registry); this helper emits bare Avro
+    (no Confluent header) which is sufficient for unit-level field-type
+    /default verification. The integration test exercises the real Registry
+    serde via the Table/SQL connector.
     """
     from fastavro import schemaless_writer
     import io
