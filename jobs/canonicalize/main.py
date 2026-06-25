@@ -109,6 +109,9 @@ class CanonicalizeJobConfig:
         dlq_topic: str = DLQ_TOPIC,
         checkpoint_interval_ms: int = 60_000,
         schema_version: int | None = None,
+        bounded: bool = False,
+        parallelism: int | None = None,
+        no_restart: bool = False,
     ) -> None:
         self.bootstrap_servers = bootstrap_servers
         self.schema_registry_url = schema_registry_url
@@ -119,6 +122,23 @@ class CanonicalizeJobConfig:
         self.checkpoint_interval_ms = checkpoint_interval_ms
         # If None, the job resolves the live version from the Registry at startup.
         self.schema_version = schema_version
+        # When True the KafkaSource is created in BOUNDED mode: it reads from the
+        # earliest offset up to the LATEST offset captured at job startup, then
+        # sends MAX_WATERMARK and finishes -- which makes the bounded streaming
+        # job drain and ``env.execute()`` return (so an integration test can run
+        # the real PyFlink job deterministically, terminating on its own). The
+        # production job stays unbounded (False) as designed.
+        self.bounded = bounded
+        # Optional parallelism override (None -> env default). Integration tests set
+        # parallelism=1 to make the bounded run fully deterministic and to keep the
+        # exactly-once Kafka txn to a single sink subtask.
+        self.parallelism = parallelism
+        # When True disable the restart strategy so a runtime failure surfaces
+        # immediately (the default FIXED_DELAY-with-Integer.MAX_VALUE-retries
+        # strategy, auto-enabled when checkpointing is on, would otherwise mask a
+        # ProcessFunction crash by restarting forever -- which made the live job
+        # appear to hang). The production job keeps the default (fault-tolerant).
+        self.no_restart = no_restart
 
     def effective_schema_version(self) -> int:
         return self.schema_version if self.schema_version is not None else (
@@ -153,10 +173,15 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
     from pyflink.common import (
         Duration,
         Row,
-        TimestampAssigner,
+        Time,
         Types,
         WatermarkStrategy,
     )
+    # TimestampAssigner is defined in pyflink.common.watermark_strategy but is
+    # NOT re-exported at the `pyflink.common` package level in 1.19 (gate
+    # review importing it from `pyflink.common` was wrong -- ImportError on
+    # the live runtime). Import it from its defining submodule directly.
+    from pyflink.common.watermark_strategy import TimestampAssigner
     from pyflink.common.serialization import SimpleStringSchema
     from pyflink.datastream import (
         OutputTag,
@@ -190,6 +215,12 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
     # --- environment --------------------------------------------------------
     env = StreamExecutionEnvironment.get_execution_environment()
     env.set_runtime_mode(RuntimeExecutionMode.STREAMING)
+    if config.parallelism is not None:
+        env.set_parallelism(config.parallelism)
+    if config.no_restart:
+        from pyflink.common import RestartStrategies
+
+        env.set_restart_strategy(RestartStrategies.no_restart())
     env.enable_checkpointing(config.checkpoint_interval_ms)
 
     # StreamTableEnvironment wraps the same DataStream env so the canonical
@@ -197,7 +228,7 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
     # run as ONE submitted job. (avro-confluent is the only real PyFlink path
     # to the Confluent Registry Avro serde; there is no DataStream equivalent.)
     table_settings = EnvironmentSettings.new_instance().in_streaming_mode().build()
-    tbl_env = StreamTableEnvironment.create(env, settings=table_settings)
+    tbl_env = StreamTableEnvironment.create(env, environment_settings=table_settings)
 
     schema_version = config.effective_schema_version()
 
@@ -205,15 +236,22 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
     dlq_tag = OutputTag("dlq", Types.STRING())
 
     # --- source: raw.strength as JSON string --------------------------------
-    source = (
+    source_builder = (
         KafkaSource.builder()
         .set_bootstrap_servers(config.bootstrap_servers)
         .set_topics(config.raw_topic)
         .set_group_id(config.group_id)
         .set_starting_offsets(KafkaOffsetsInitializer.earliest())
         .set_value_only_deserializer(SimpleStringSchema())
-        .build()
     )
+    if config.bounded:
+        # Bounded mode (test/integration): read from earliest to the latest
+        # offset captured at startup, then finish. Lets `env.execute()` terminate
+        # deterministically. Production stays unbounded (the KafkaSource default).
+        source_builder = source_builder.set_bounded(
+            KafkaOffsetsInitializer.latest()
+        )
+    source = source_builder.build()
 
     # Event-time assigner: parses event_time (ISO-8601 string) out of the raw
     # JSON envelope and converts it to epoch-ms so downstream event-time
@@ -300,7 +338,7 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
 
         def open(self, runtime_context: Any) -> None:  # noqa: D401
             ttl = StateTtlConfig.new_builder(
-                Duration.of_days(DEDUP_TTL_DAYS)
+                Time.days(DEDUP_TTL_DAYS)
             ).set_update_type(
                 StateTtlConfig.UpdateType.OnCreateAndWrite
             ).set_state_visibility(
@@ -397,6 +435,26 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
     # value.fields-include defaults to ALL -> athlete_id is ALSO present in the
     # Avro value, matching the registered TrainingEvent.avsc schema (which
     # lists athlete_id as a required field).
+    #
+    # RUNTIME-VERIFIED DIVERGENCE (found by the real E2E test in
+    # tests/integration/test_canonicalize_job.py, NOT by static review):
+    # Flink's Table ``avro-confluent`` format infers the Avro writers schema
+    # from the DDL column types (Context7 confirmed -- there is NO option to
+    # supply an explicit .avsc). The Table type system has NO Avro enum, so
+    # ``event_type STRING`` below emits Avro ``{"type":"string"}``, which is
+    # INCOMPATIBLE under BACKWARD with ``schemas/canonical/TrainingEvent.avsc``
+    # (where ``event_type`` is an enum; Avro forbids enum<->string promotion ->
+    # SR returns HTTP 409 "Schema being registered is incompatible with an
+    # earlier schema"). For this reason the live sink subject MUST be left
+    # empty before the Flink sink registers its first version -- do NOT
+    # pre-register ``TrainingEvent.avsc`` against the live canonical sink
+    # subject (the integration test mirrors exactly this runtime discipline).
+    # The avsc stays the cross-process design contract (verified by unit tests
+    # + bootstrap.register_schemas in the deploy pipeline); the live registry
+    # subject records the schema the sink actually emits. Follow-up tracked in
+    # PR3 apply-progress: either relax the avsc to ``event_type STRING`` (with
+    # an explicit symbol-set validator in the transform), or adopt a
+    # DataStream Avro serializer that emits the enum.
     #
     # The kafka connector's EXACTLY_ONCE delivery requires a transactional-id
     # prefix (spec: canonical sink is EXACTLY_ONCE; DLQ is AT_LEAST_ONCE).

@@ -69,7 +69,7 @@ def redpanda(docker_ok):
 def redpanda_endpoints(redpanda) -> dict:
     """Bootstrap servers and Schema Registry HTTP URL backed by the Redpanda session."""
     return {
-        "bootstrap_servers": redpanda.get_bootstrap_servers(),
+        "bootstrap_servers": redpanda.get_bootstrap_server(),
         "schema_registry_url": redpanda.get_schema_registry_address(),
     }
 
