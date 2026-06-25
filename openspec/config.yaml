@@ -1,0 +1,50 @@
+schema: spec-driven
+
+context: |
+  Project: AthleteOS — real-time athlete data platform
+  Stack (intended): Python 3.12, Apache Kafka, Schema Registry, Apache Flink,
+    Apache Iceberg, PostgreSQL, FastAPI, Streamlit, Docker Compose
+  Optional: DuckDB, dbt-core, Trino
+  Observability: Prometheus, Grafana
+  Testing (intended): pytest
+  Architecture: event-time-first, layered (raw → canonical → stream processing → serving → analytical → API/UI)
+  Status: greenfield — no source code on disk yet
+
+strict_tdd: false
+
+testing:
+  runner: pytest
+  runner_status: not_present
+  command: "pytest"
+  coverage_command: "pytest --cov"
+  layers:
+    unit: false
+    integration: false
+    e2e: false
+  note: "Intended runner is pytest. No pyproject.toml, pytest.ini, conftest.py, or test files exist yet. Strict TDD cannot activate until a test harness is bootstrapped."
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Justify every technology choice with trade-offs
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+    - Event contracts are the source of truth — no job or API may contradict them without an explicit ADR
+  design:
+    - Include sequence diagrams for complex flows
+    - Document architecture decisions with rationale (ADR format)
+    - Event-time semantics must be explicit (watermark strategy, late data handling)
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    - Follow existing code patterns
+    tdd: false
+    test_command: "pytest"
+  verify:
+    test_command: "pytest"
+    build_command: "docker compose build"
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
