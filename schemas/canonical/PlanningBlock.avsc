@@ -1,0 +1,14 @@
+{"type": "record", "name": "PlanningBlock", "namespace": "com.athleteos.canonical", "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "event_time", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "ingest_time", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "source", "type": "string"},
+    {"name": "schema_version", "type": "int"},
+    {"name": "athlete_id", "type": "string"},
+    {"name": "block_id", "type": "string"},
+    {"name": "goal", "type": "string"},
+    {"name": "start_date", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "end_date", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "planned_sessions_per_week", "type": "int"},
+    {"name": "weekly_volume_targets", "type": "string"}
+]}

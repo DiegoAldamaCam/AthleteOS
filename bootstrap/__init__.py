@@ -1,0 +1,1 @@
+# AthleteOS bootstrap package marker. register_schemas / create_topics live here.
