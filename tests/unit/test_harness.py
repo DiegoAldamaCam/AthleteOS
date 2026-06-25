@@ -12,8 +12,20 @@ import sys
 
 
 def test_pytest_harness_collects_and_runs():
-    """The harness itself must be importable and executable."""
-    assert sys.version_info >= (3, 12), "AthleteOS requires Python >=3.12"
+    """The harness itself must be importable and executable.
+
+    The runtime is pinned to CPython 3.11.x: apache-flink 1.19 (the streaming
+    engine driving the canonicalize/metrics jobs) ships wheels for CPython
+    3.8-3.11 ONLY -- there is no 3.12+ wheel -- so the supported range is
+    ``>=3.11,<3.12`` (mirrored in pyproject.toml requires-python). The harness
+    still collects on other interpreters because the jobs isolate pyflink
+    behind lazy imports, but the PyFlink integration tests only execute on 3.11.
+    """
+    assert sys.version_info >= (3, 11), "AthleteOS requires Python >=3.11"
+    assert sys.version_info < (3, 12), (
+        "AthleteOS requires Python <3.12: apache-flink 1.19 has no CPython 3.12+ wheel "
+        "(supported range is 3.8-3.11); use a 3.11.x interpreter to run the streaming jobs"
+    )
 
 
 def test_scaffold_packages_importable():

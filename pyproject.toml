@@ -7,13 +7,18 @@ name = "athleteos"
 version = "0.1.0"
 description = "AthleteOS - real-time athlete data platform (event-staged architecture)."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11,<3.12"
 license = { text = "Proprietary" }
 authors = [{ name = "AthleteOS" }]
 
 # Runtime dependencies for the platform. Heavy/streaming deps (apache-flink) are
 # declared here for reproducibility; the test harness (see [dev]) is the slice
 # that PR1 actually exercises. PR2+ jobs will import the runtime deps.
+# requires-python is pinned to >=3.11,<3.12: apache-flink 1.19 ships wheels for
+# CPython 3.8-3.11 ONLY (no 3.12+ wheels), so 3.11.x is the single supported
+# runtime for the streaming jobs. The harness + unit tests still collect/import
+# cleanly on other interpreters (jobs isolate pyflink behind lazy imports), but
+# the integration test that executes the PyFlink job requires 3.11.
 dependencies = [
   "apache-flink>=1.19",
   "confluent-kafka>=2.5",
