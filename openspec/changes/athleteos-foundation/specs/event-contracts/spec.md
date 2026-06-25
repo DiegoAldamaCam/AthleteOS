@@ -51,7 +51,7 @@ The system MUST define a `TrainingEvent` Avro record covering both strength sets
     {"name": "source", "type": "string"},
     {"name": "schema_version", "type": "int"},
     {"name": "athlete_id", "type": "string"},
-    {"name": "event_type", "type": {"type": "enum", "name": "TrainingEventType", "symbols": ["STRENGTH_SET", "CARDIO_ACTIVITY"]}},
+    {"name": "event_type", "type": "string"},
     {"name": "workout_id", "type": ["null", "string"], "default": null},
     {"name": "exercise_id", "type": ["null", "string"], "default": null},
     {"name": "set_number", "type": ["null", "int"], "default": null},
@@ -68,6 +68,8 @@ The system MUST define a `TrainingEvent` Avro record covering both strength sets
   ]
 }
 ```
+
+**`event_type` representation (ADR-15):** `event_type` is an Avro **`string`** (not an enum) on the wire. The semantic guarantee of the former enum is preserved at the application layer: the allowed values are exactly `{"STRENGTH_SET", "CARDIO_ACTIVITY"}`, enforced in the canonicalize transform's `validate_training_event()`. An out-of-set `event_type` raises a validation error and is routed to the DLQ as `VALIDATION_FAILURE`. Rationale: the Flink 1.19 `avro-confluent` Table sink derives the Avro writer schema from Table column types and has no Avro enum type, so it emits `string`; relaxing the contract to `string` makes the design contract and the runtime wire format converge, while the transform-layer symbol-set guard keeps the enum's semantic guarantee (consumers no longer get registry-level enum enforcement, but get application-level validation + DLQ routing instead).
 
 **Source Field Mappings:**
 
@@ -154,6 +156,8 @@ The system MUST define a `WellnessEvent` Avro record covering recovery, nutritio
   ]
 }
 ```
+
+**WellnessEvent `event_type` (consistency note):** `WellnessEvent.avsc` still declares `event_type` as an Avro enum today, but the same enum→string + application-layer symbol-set validation pattern (ADR-15) will apply to wellness when the wellness canonicalize branch is implemented, so the canonical contract stays consistent across entities. This PR (PR3) does NOT change `WellnessEvent` — it is out of scope and not yet implemented.
 
 **Source Field Mappings:**
 

@@ -5,7 +5,7 @@
     {"name": "source", "type": "string"},
     {"name": "schema_version", "type": "int"},
     {"name": "athlete_id", "type": "string"},
-    {"name": "event_type", "type": {"type": "enum", "name": "TrainingEventType", "symbols": ["STRENGTH_SET", "CARDIO_ACTIVITY"]}},
+    {"name": "event_type", "type": "string"},
     {"name": "workout_id", "type": ["null", "string"], "default": null},
     {"name": "exercise_id", "type": ["null", "string"], "default": null},
     {"name": "set_number", "type": ["null", "int"], "default": null},
