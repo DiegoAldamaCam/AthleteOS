@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Local data / warehouses (never commit data)
+warehouse/
+data/synthetic/output/
+data/samples/lake/
+*.log
+
+# Flink checkpoints / savepoints
+checkpoints/
+savepoints/
+flink-logs/
+
+# Local agent/tooling caches (not project artifacts)
+.atl/
+
+# Ephemeral orchestrator prompt scratch files
+prompt.md

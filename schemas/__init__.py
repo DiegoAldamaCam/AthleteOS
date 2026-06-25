@@ -1,0 +1,1 @@
+# AthleteOS canonical Avro schemas package marker.
