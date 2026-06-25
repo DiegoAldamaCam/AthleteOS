@@ -237,6 +237,74 @@ def test_validate_training_event_rejects_missing_required_envelope_field():
         T.validate_training_event(event)
 
 
+# --- event_type symbol-set validation (ADR-15: Avro STRING + app-layer guard) --
+
+
+def test_validate_training_event_accepts_strength_set():
+    """STRENGTH_SET is in ALLOWED_EVENT_TYPES -> accepted."""
+    event = T.transform_strength_to_canonical(_raw_strength_envelope(), schema_version=1)
+    event["event_type"] = T.STRENGTH_SET
+    # must not raise
+    T.validate_training_event(event)
+
+
+def test_validate_training_event_accepts_cardio_activity():
+    """CARDIO_ACTIVITY is in ALLOWED_EVENT_TYPES -> accepted (the cardio
+    canonicalize branch is post-MVP, but the symbol-set guard is type-agnostic
+    and must accept it so the contract is symmetric)."""
+    event = T.transform_strength_to_canonical(_raw_strength_envelope(), schema_version=1)
+    event["event_type"] = T.CARDIO_ACTIVITY
+    # must not raise
+    T.validate_training_event(event)
+
+
+def test_validate_training_event_rejects_out_of_set_event_type():
+    """An event_type NOT in ALLOWED_EVENT_TYPES (e.g. a typo) MUST raise
+    ValidationError -> routes to DLQ as VALIDATION_FAILURE via
+    select_dlq_error_type (ADR-15: the enum's semantic guarantee is enforced
+    at the application layer since the Avro wire type is STRING)."""
+    event = T.transform_strength_to_canonical(_raw_strength_envelope(), schema_version=1)
+    event["event_type"] = "STRENGTH"  # not in the allowed symbol set
+    with pytest.raises(T.ValidationError) as exc_info:
+        T.validate_training_event(event)
+    assert "event_type" in str(exc_info.value).lower()
+
+
+def test_out_of_set_event_type_routes_to_validation_failure():
+    """select_dlq_error_type(ValidationError) == VALIDATION_FAILURE, so an
+    out-of-set event_type is DLQ-classified as VALIDATION_FAILURE (consistent
+    with the existing missing-field / out-of-range routes)."""
+    bad_event = T.transform_strength_to_canonical(
+        _raw_strength_envelope(), schema_version=1
+    )
+    bad_event["event_type"] = "BOGUS"
+    try:
+        T.validate_training_event(bad_event)
+    except T.ValidationError as exc:
+        assert T.select_dlq_error_type(exc) == T.VALIDATION_FAILURE
+    else:
+        pytest.fail("out-of-set event_type should have raised ValidationError")
+
+
+def test_validate_training_event_rejects_empty_event_type():
+    """Empty string is neither a valid symbol nor a usable partition label."""
+    event = T.transform_strength_to_canonical(_raw_strength_envelope(), schema_version=1)
+    event["event_type"] = ""
+    with pytest.raises(T.ValidationError):
+        T.validate_training_event(event)
+
+
+def test_training_event_avsc_delegates_event_type_as_string_not_enum():
+    """ADR-15: the canonical TrainingEvent.avsc declares event_type as a plain
+    Avro STRING (NOT an enum). This is what the Flink 1.19 avro-confluent sink
+    actually emits, so the design contract and the runtime wire format converge."""
+    schema = T.load_training_event_avsc()
+    et_field = next(f for f in schema["fields"] if f["name"] == "event_type")
+    assert et_field["type"] == "string", (
+        f"event_type must be Avro 'string' per ADR-15, got {et_field['type']!r}"
+    )
+
+
 # --- DLQ error envelope -----------------------------------------------------
 
 

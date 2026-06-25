@@ -9,8 +9,10 @@ inside its ``KeyedProcessFunction`` and import-isolates pyflink.
 Contracts (event-contracts spec):
   - Common Event Envelope: event_time/ingest_time are epoch-ms longs,
     schema_version is a REQUIRED int (added here; the raw envelope omits it).
-  - TrainingEvent Avro schema; event_type = STRENGTH_SET for strength-sourced
-    events.
+  - TrainingEvent Avro schema; event_type is an Avro STRING constrained at the
+    application layer to ALLOWED_EVENT_TYPES (STRENGTH_SET, CARDIO_ACTIVITY) —
+    see ADR-15 (Flink 1.19 avro-confluent sink has no Avro enum type, so the
+    wire type is string and the symbol set is enforced in validate_training_event).
   - session_load derivation for STRENGTH_SET:
         reps * weight_kg * (rpe / 10.0)   when rpe present
         reps * weight_kg                  when rpe absent
@@ -57,6 +59,16 @@ TRANSFORM_ERROR = "TRANSFORM_ERROR"
 
 STRENGTH_SET = "STRENGTH_SET"
 CARDIO_ACTIVITY = "CARDIO_ACTIVITY"
+
+# Canonical event_type is an Avro STRING (not an enum) on the wire — see
+# ADR-15. The semantic guarantee of the former Avro enum is preserved at the
+# application layer: validate_training_event() rejects any event_type NOT in
+# this symbol set, routing the offending record to the DLQ as
+# VALIDATION_FAILURE (consistent with the existing select_dlq_error_type path).
+# Update this set only via an explicit ADR-backed contract change; the wire
+# type itself is open-ended so consumers no longer get registry-level enum
+# enforcement and rely on this guard instead.
+ALLOWED_EVENT_TYPES: frozenset[str] = frozenset({STRENGTH_SET, CARDIO_ACTIVITY})
 
 # Required Common Event Envelope + required TrainingEvent fields.
 # (session_load is required on the Avro record; null cardio fields are allowed.)
@@ -280,9 +292,13 @@ def validate_training_event(event: dict) -> None:
 
     Catches:
       - missing required envelope/session_load fields -> ValidationError
+      - event_type not in ALLOWED_EVENT_TYPES -> ValidationError
+        (the wire type is Avro STRING per ADR-15; the former enum's semantic
+        guarantee is enforced here at the application layer, routing off-symbol
+        values to the DLQ as VALIDATION_FAILURE via select_dlq_error_type)
       - session_load is NaN / inf -> ValidationError (spec DLQ scenario)
 
-    The Avro schema itself enforces types at serialization; this is the
+    The Avro schema itself enforces field types at serialization; this is the
     in-ProcessFunction guard that lets the job route bad records to the DLQ
     side output BEFORE serializing (cheap, deterministic).
     """
@@ -291,6 +307,19 @@ def validate_training_event(event: dict) -> None:
     for field in _REQUIRED_ENVELOPE_FIELDS:
         if field not in event or event[field] is None:
             raise ValidationError(f"missing required canonical field: {field!r}")
+    event_type = event.get("event_type")
+    if not isinstance(event_type, str) or event_type == "":
+        raise ValidationError(
+            f"event_type must be a non-empty string in {sorted(ALLOWED_EVENT_TYPES)!r}, "
+            f"got {event_type!r}"
+        )
+    if event_type not in ALLOWED_EVENT_TYPES:
+        raise ValidationError(
+            f"event_type {event_type!r} not in allowed set "
+            f"{sorted(ALLOWED_EVENT_TYPES)!r} -- route to DLQ as "
+            f"VALIDATION_FAILURE (ADR-15: symbol set enforced at application "
+            f"layer since the Avro wire type is STRING, not enum)"
+        )
     sl = event.get("session_load")
     if not isinstance(sl, (int, float)) or isinstance(sl, bool):
         raise ValidationError("session_load must be a number")

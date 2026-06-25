@@ -436,25 +436,30 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
     # Avro value, matching the registered TrainingEvent.avsc schema (which
     # lists athlete_id as a required field).
     #
-    # RUNTIME-VERIFIED DIVERGENCE (found by the real E2E test in
-    # tests/integration/test_canonicalize_job.py, NOT by static review):
-    # Flink's Table ``avro-confluent`` format infers the Avro writers schema
+    # RUNTIME-VERIFIED: ``event_type`` wire format CONVERGES (ADR-15).
+    # Flink's Table ``avro-confluent`` format infers the Avro writer schema
     # from the DDL column types (Context7 confirmed -- there is NO option to
     # supply an explicit .avsc). The Table type system has NO Avro enum, so
-    # ``event_type STRING`` below emits Avro ``{"type":"string"}``, which is
-    # INCOMPATIBLE under BACKWARD with ``schemas/canonical/TrainingEvent.avsc``
-    # (where ``event_type`` is an enum; Avro forbids enum<->string promotion ->
-    # SR returns HTTP 409 "Schema being registered is incompatible with an
-    # earlier schema"). For this reason the live sink subject MUST be left
-    # empty before the Flink sink registers its first version -- do NOT
-    # pre-register ``TrainingEvent.avsc`` against the live canonical sink
-    # subject (the integration test mirrors exactly this runtime discipline).
-    # The avsc stays the cross-process design contract (verified by unit tests
-    # + bootstrap.register_schemas in the deploy pipeline); the live registry
-    # subject records the schema the sink actually emits. Follow-up tracked in
-    # PR3 apply-progress: either relax the avsc to ``event_type STRING`` (with
-    # an explicit symbol-set validator in the transform), or adopt a
-    # DataStream Avro serializer that emits the enum.
+    # ``event_type STRING`` below emits Avro ``{"type":"string"}``.
+    # ``schemas/canonical/TrainingEvent.avsc`` now ALSO declares ``event_type``
+    # as a plain ``string`` (approved change ADR-15), so the design contract
+    # and the runtime wire format now CONVERGE -- no more HTTP 409 enum<->string
+    # incompatibility. The former enum's semantic guarantee is preserved at the
+    # application layer by ``validate_training_event()`` (symbol set
+    # ``{STRENGTH_SET, CARDIO_ACTIVITY}``; out-of-set -> ValidationError ->
+    # DLQ VALIDATION_FAILURE via select_dlq_error_type).
+    #
+    # Why the live sink subject is still NOT pre-registered here: the
+    # DDL-inferred writer schema may still differ from ``TrainingEvent.avsc``
+    # on nullable-union vs plain-type for optional fields (the avsc declares
+    # e.g. ``workout_id`` as ``["null","string"]`` with default null, while the
+    # DDL emits a plain ``STRING`` that the connector maps to a non-union Avro
+    # type under certain versions). Letting the Flink sink own the live
+    # writer-schema registration keeps the first emission consistent with the
+    # BACKWARD subject compatibility; the cross-process design contract stays
+    # verified by ``tests/unit/test_canonicalize_transform.py`` (against the
+    # .avsc) and by ``bootstrap.register_schemas`` in the deploy pipeline. The
+    # integration test mirrors exactly this runtime discipline.
     #
     # The kafka connector's EXACTLY_ONCE delivery requires a transactional-id
     # prefix (spec: canonical sink is EXACTLY_ONCE; DLQ is AT_LEAST_ONCE).

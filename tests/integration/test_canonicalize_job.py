@@ -257,39 +257,33 @@ def test_canonicalize_job_e2e_valid_dlq_dedup(redpanda_endpoints):
     dlq_topic = f"dlq.canonical.training_event.e2e.{run_id}"
     subject = f"{canonical_topic}-value"
 
-    # --- Subject compatibility: BACKWARD (contracts future versions) ---------
+# --- Subject compatibility: BACKWARD (contracts future versions) ---------
     #
-    # RUNTIME-VERIFIED BUG (this real run, not the static review):
-    # The canonical sink CANNOT rehearse ``schemas/canonical/TrainingEvent.avsc``
-    # as its writers schema through Flink 1.19's ``avro-confluent`` Table format
-    # because the Table API infers the Avro record schema from the sink's DDL
-    # column types (Context7 confirmed -- there is NO ``value.avro-confluent
-    # .schema`` option to supply a writers schema explicitly). Flink's Table
-    # type system has NO Avro ``enum`` type: the DDL column ``event_type STRING``
-    # generates Avro ``{"type":"string"}``, which is INCOMPATIBLE under BACKWARD
-    # with the spec avsc's enum ``{"type":"enum", "name":"TrainingEventType",
-    # "symbols":[...]}`` (Avro forbids enum<->string promotion -> SR returns
-    # ``error code: 409 Schema being registered is incompatible with an earlier
-    # schema for subject {...-value}``).
+    # RUNTIME-VERIFIED (this real run, not the static review) + ADR-15:
+    # ``event_type`` wire format CONVERGES. ``schemas/canonical/TrainingEvent
+    # .avsc`` now declares ``event_type`` as a plain Avro STRING (approved
+    # change ADR-15), matching what Flink 1.19's ``avro-confluent`` Table
+    # format infers from the sink's DDL column types (Context7 confirmed --
+    # there is NO ``value.avro-confluent.schema`` option to supply a writer
+    # schema explicitly; the Table type system has NO Avro enum type, so the
+    # DDL ``event_type STRING`` emits Avro ``{"type":"string"}``). The former
+    # enum's semantic guarantee is preserved at the application layer by
+    # ``validate_training_event()`` (symbol set ``{STRENGTH_SET, CARDIO_
+    # ACTIVITY}``; out-of-set -> ValidationError -> DLQ VALIDATION_FAILURE via
+    # select_dlq_error_type).
     #
-    # Pre-registering the spec avsc against the live sink subject therefore
-    # fatally broke the very first Flink sink emission. The fix is the test
-    # route endorsed in PR3's apply brief: let the Flink avro-confluent sink
-    # OWN the live writers schema for the per-test subject (first registration
-    # has no prior schema -> compatibility check vacuously passes; BACKWARD is
-    # still SET on the subject so future versions honor the production
-    # contract). The design contract itself stays verified in
-    # ``tests/unit/test_canonicalize_transform.py`` (validate_training_event
-    # against the avsc) and by ``bootstrap.register_schemas`` in the deploy
-    # pipeline; this integration test verifies the RUNTIME sink path against
-    # the schema Flink actually emits.
-    #
-    # FOLLOW-UP (out of scope here -- do NOT redesign the topology minimally):
-    # either relax ``TrainingEvent.avsc`` to ``event_type STRING`` (validate
-    # the symbol set explicitly in the transform), or wrap the canonical sink
-    # in a TypeInformation-driven DataStream Avro serializer that emits the
-    # enum. Recorded against PR3 apply-progress; tracked as a known design
-    # divergence surfaced by the real runtime.
+    # Why the sink still OWNS the live writer-schema registration here (not
+    # pre-registered against the spec avsc): the DDL-inferred writer schema can
+    # still differ from ``TrainingEvent.avsc`` on nullable-union vs plain-type
+    # for optional fields (e.g. ``workout_id`` is ``["null","string"]`` in the
+    # avsc but the DDL emits a plain ``STRING``). Pre-registering the avsc
+    # could still surface a BACKWARD mismatch on those fields; letting the sink
+    # own the first registration keeps the live subject consistent. The cross-
+    # process design contract stays verified in
+    # ``tests/unit/test_canonicalize_transform.py`` (validate_training_event /
+    # avro roundtrip against the .avsc) and by ``bootstrap.register_schemas``
+    # in the deploy pipeline; this integration test verifies the RUNTIME sink
+    # path against the schema Flink actually emits.
     from bootstrap.register_schemas import set_compatibility
 
     set_compatibility(registry_url, subject, "BACKWARD")
