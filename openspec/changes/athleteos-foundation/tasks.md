@@ -41,9 +41,9 @@ Chain strategy: pending
 
 ## Phase 3: Strength Ingestion (deps: 1.x+2.x, M ~4d)
 
-- [ ] 3.1 Create `ingestion/strength/{parser,watcher,producer}.py`: Strong CSV → raw envelope JSON → `raw.strength` (KafkaProducer, athlete_id key)
-- [ ] 3.2 Unit tests: CSV parsing (valid/malformed), envelope generation (UUID, ISO time, source=strong_csv), session_load formula (reps×weight_kg×(rpe/10), fallback reps×weight_kg)
-- [ ] 3.3 Integration test: CSV file drop → events in `raw.strength` with correct JSON shape (testcontainers Kafka)
+- [x] 3.1 Create `ingestion/strength/{parser,watcher,producer}.py`: Strong CSV → raw envelope JSON → `raw.strength` (KafkaProducer, athlete_id key)
+- [x] 3.2 Unit tests: CSV parsing (valid/malformed), envelope generation (UUID, ISO time, source=strong_csv). NOTE: session_load formula (reps×weight_kg×(rpe/10), fallback reps×weight_kg) is intentionally NOT tested here — per event-contracts spec "session_load derivation (computed at canonicalization)" it belongs to the PR3 canonicalize job, not the raw ingestion connector. The raw connector emits the verbatim payload; session_load is derived in PR3. tasks.md 3.2 wording contradicts the spec; spec is source of truth.
+- [x] 3.3 Integration test: CSV file drop → events in `raw.strength` with correct JSON shape (testcontainers Kafka)
 
 ## Phase 4: Canonicalize Job (deps: 2.x, L ~6d)
 
