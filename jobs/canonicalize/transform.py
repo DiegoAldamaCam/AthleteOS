@@ -116,14 +116,57 @@ def compute_strength_session_load(reps: int, weight_kg: float, rpe: float | None
         session_load = reps * weight_kg * (rpe / 10.0)   when rpe present
         session_load = reps * weight_kg                  when rpe absent
 
-    A falsy/zero ``rpe`` is treated as 'absent' (matches the absent-rpe branch):
-    RPE 0 is not a meaningful measurement, so the volume-only proxy is used.
+    Out-of-range handling (spec DLQ rule line ~357: out-of-range value ->
+    VALIDATION_FAILURE):
+      - ``rpe < 0`` is physically impossible. A negative RPE is an out-of-range
+        data-quality problem, NOT an absent measurement, so the source record
+        MUST be routed to the DLQ (error_type=VALIDATION_FAILURE) instead of
+        being silently normalized via the volume-only proxy. We raise
+        ``ValidationError`` here; the canonicalize ProcessFunction catches it
+        and routes via :func:`select_dlq_error_type`.
+      - ``rpe == 0`` (falsy zero) is treated as 'absent' and mapped to the
+        volume-only branch: RPE 0 is not a meaningful measurement (no
+        RPE-assisted set is actually rated 0), so the volume-only proxy is the
+        documented fallback (decision preserved from PR3 v1).
     """
     if reps is None or weight_kg is None:
         raise ValidationError("session_load requires non-null reps and weight_kg")
-    if rpe is None or rpe <= 0:
+    if rpe is not None and rpe < 0:
+        raise ValidationError(
+            f"rpe out of range (negative): {rpe!r} -- route to DLQ as "
+            f"VALIDATION_FAILURE (spec DLQ Routing table line ~357)"
+        )
+    if rpe is None or rpe == 0:
         return float(reps) * float(weight_kg)
     return float(reps) * float(weight_kg) * (float(rpe) / 10.0)
+
+
+# --- DLQ error_type routing (pure helper, spec DLQ Routing table) ------------
+
+
+def select_dlq_error_type(exc: BaseException) -> str:
+    """Pick the spec DLQ ``error_type`` string for a raised exception.
+
+    Spec DLQ Routing rules (event-contracts spec ~line 353):
+      - VALIDATION_FAILURE      <- "Missing required field, out-of-range value"
+      - SCHEMA_INCOMPATIBILITY  <- Schema Registry rejects producer write
+                                   (not raised here; surfaced by the sink).
+      - DESERIALIZATION_ERROR   <- malformed Avro bytes on the CONSUMER side
+                                   (raw side is JSON here, NOT Avro, so this
+                                   code never applies to raw-strength failures).
+      - TRANSFORM_ERROR         <- raw->canonical mapping failure.
+
+    This helper is intentionally pure (no pyflink) so DLQ routing has unit
+    coverage independent of the gated Flink integration test. The canonicalize
+    ProcessFunction (jobs/canonicalize/main.py) catches ``ValidationError`` /
+    ``TransformError`` (and any re-raised ``TransformError`` over a malformed
+    JSON envelope) and dispatches via this helper.
+    """
+    if isinstance(exc, ValidationError):
+        return VALIDATION_FAILURE
+    # Any other exception during canonicalization is a raw->canonical mapping
+    # failure (covers malformed raw JSON, unexpected coercion failures, etc.).
+    return TRANSFORM_ERROR
 
 
 # --- core transform: raw strength envelope -> canonical TrainingEvent -------

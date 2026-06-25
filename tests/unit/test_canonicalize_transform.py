@@ -338,6 +338,62 @@ def test_canonical_event_roundtrips_through_avro_against_schema():
     assert decoded["avg_hr"] is None
 
 
+# --- DLQ error_type routing (pure helper exercised independent of Flink) ----
+
+
+def test_select_dlq_error_type_routes_validation_error_to_validation_failure():
+    """Spec DLQ rule line ~357: missing required field / out-of-range value
+    -> VALIDATION_FAILURE. ValidationError is the python face of that class."""
+    assert T.select_dlq_error_type(T.ValidationError("missing field")) == T.VALIDATION_FAILURE
+
+
+def test_select_dlq_error_type_routes_transform_error_to_transform_error():
+    """Spec DLQ rule line ~360: raw->canonical mapping failure -> TRANSFORM_ERROR."""
+    assert T.select_dlq_error_type(T.TransformError("bad mapping")) == T.TRANSFORM_ERROR
+
+
+def test_select_dlq_error_type_routes_unexpected_exception_to_transform_error():
+    """Defensive: any unhandled exception during canonicalization is a
+    raw->canonical mapping failure -> TRANSFORM_ERROR (covers malformed JSON
+    in the raw envelope; raw side is JSON, not Avro, so DESERIALIZATION_ERROR
+    does not apply here)."""
+    assert T.select_dlq_error_type(RuntimeError("boom")) == T.TRANSFORM_ERROR
+
+
+# --- out-of-range rpe spec rule (spec line ~357: out-of-range -> DLQ) -------
+
+
+def test_compute_session_load_negative_rpe_raises_validation_error():
+    """Spec DLQ rule line ~357: out-of-range value -> VALIDATION_FAILURE.
+    rpe < 0 is physically impossible; route the source record to the DLQ
+    instead of silently using the volume-only proxy (decision documented in
+    transform.compete_strength_session_load)."""
+    with pytest.raises(T.ValidationError) as exc_info:
+        T.compute_strength_session_load(reps=8, weight_kg=100.0, rpe=-1.0)
+    assert "rpe" in str(exc_info.value).lower()
+
+
+def test_transform_strength_negative_rpe_routes_to_validation_failure():
+    """Negative rpe must surface as ValidationError from the transform itself
+    so the canonicalize ProcessFunction routes the record to the DLQ with
+    error_type=VALIDATION_FAILURE (via select_dlq_error_type)."""
+    raw = _raw_strength_envelope(
+        payload={
+            "workout_id": "w-bad",
+            "exercise_id": "bench-press",
+            "set_number": 1,
+            "reps": 8,
+            "weight_kg": 100.0,
+            "rpe": -2.0,
+            "rir": None,
+            "timestamp": "2024-02-01T08:00:00",
+        }
+    )
+    with pytest.raises(T.ValidationError) as exc_info:
+        T.transform_strength_to_canonical(raw, schema_version=1)
+    assert "rpe" in str(exc_info.value).lower()
+
+
 def test_canonical_event_roundtrips_when_rpe_absent():
     raw = _raw_strength_envelope(
         payload={
