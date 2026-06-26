@@ -83,8 +83,8 @@ daily_load(d) = Σ session_load(e) for all training events e on day d
 | Metric | Formula | Window | Notes |
 |--------|---------|--------|-------|
 | `acute_load` | `Σ daily_load(d) for d in [t-6, t]` | 7-day rolling sum | Total recent training load |
-| `chronic_load_28d` | `Σ daily_load(d) for d in [t-27, t] / 28` | 28-day rolling average | Baseline fitness proxy |
-| `chronic_load_42d` | `Σ daily_load(d) for d in [t-41, t] / 42` | 42-day rolling average | Longer-term baseline |
+| `chronic_load_28d` | `Σ daily_load(d) for d in [t-27, t] / n` | 28-day rolling average | Baseline fitness proxy; **n = days present in window** (see ADR-16) |
+| `chronic_load_42d` | `Σ daily_load(d) for d in [t-41, t] / n` | 42-day rolling average | Longer-term baseline; **n = days present in window** (see ADR-16) |
 | `acute_chronic_ratio` | `acute_load(t) / chronic_load_28d(t)` | Point-in-time | NULL if chronic_load_28d = 0 |
 | `deload_flag` | Rule-based (see below) | 3-day consecutive | +1 / 0 / -1 |
 

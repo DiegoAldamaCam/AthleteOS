@@ -1,0 +1,605 @@
+"""Unit tests for the PURE metrics-computation logic (PR4, task 5.1-5.4 pure half).
+
+These tests run WITHOUT pyflink and WITHOUT Docker -- they exercise
+``jobs.metrics.compute`` which is deliberately pyflink-free so the spec metric
+formulas (daily_load, acute/chronic rolling windows, ACR, deload state machine)
+have full unit coverage on any interpreter (CPython 3.14 included).
+
+Source of truth: serving-store spec "Metric Formulas".
+  daily_load(d)       = sum(session_load on day d)
+  acute_load          = sum(daily_load for d in [t-6, t])           -- 7d rolling SUM
+  chronic_load_28d    = sum(daily_load for d in [t-27, t]) / n      -- 28d rolling AVG, n=days present (ADR-16)
+  chronic_load_42d    = sum(daily_load for d in [t-41, t]) / n      -- 42d rolling AVG, n=days present (ADR-16)
+  acute_chronic_ratio = acute_load / chronic_load_28d               -- NULL if chronic=0
+  deload_flag         = +1 if ACR>1.3 for >=3 consecutive days
+                      | -1 if ACR<0.8 for >=3 consecutive days
+                      | 0  otherwise
+"""
+
+from __future__ import annotations
+
+import math
+
+import pytest
+
+import json
+
+from jobs.metrics.compute import (
+    ACUTE_WINDOW_DAYS,
+    CHRONIC_28D_WINDOW_DAYS,
+    CHRONIC_42D_WINDOW_DAYS,
+    DELOAD_HIGH,
+    DELOAD_LOW,
+    DELOAD_NORMAL,
+    LATE_DATA,
+    METRICS_SOURCE_TOPIC,
+    MILLIS_PER_DAY,
+    VALIDATION_FAILURE,
+    acute_chronic_ratio,
+    acute_load,
+    build_metrics_dlq_envelope,
+    chronic_load,
+    compute_deload_flags,
+    compute_rolling_metrics,
+    is_finite_load,
+    metrics_row_to_json,
+    sum_loads,
+    update_deload_state,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_DAY_MS = MILLIS_PER_DAY  # alias for brevity in rolling-window tests
+
+# A simple by_day fixture: N consecutive days starting from day 0.
+# day_start_ms for day i = i * _DAY_MS (window_end is just above the last day).
+
+
+def _by_day(n_days: int, load_per_day: float = 100.0) -> dict[int, float]:
+    """Return {day_start_ms: load} for days 0..n_days-1."""
+    return {i * _DAY_MS: load_per_day for i in range(n_days)}
+
+
+def _window_end(n_days: int) -> int:
+    """window_end = n_days * MILLIS_PER_DAY (exclusive, day-aligned)."""
+    return n_days * _DAY_MS
+
+
+# --- compute_rolling_metrics (C8 single source of truth) -------------------
+
+
+class TestComputeRollingMetrics:
+    """Prove that compute_rolling_metrics() is the canonical window formula.
+
+    These tests directly test the pure function that the Flink window operator
+    calls, guaranteeing the implementation running in prod is the same one that
+    passed the unit tests. (C8 readability / single source of truth)
+    """
+
+    def test_7_days_full_window(self):
+        # 7 days @100: acute=700, chronic_28d=100 (/7=100), ACR=7.0
+        by_day = _by_day(7)
+        w_end = _window_end(7)
+        al, cl28, cl42, acr = compute_rolling_metrics(by_day, w_end)
+        assert al == pytest.approx(700.0)
+        assert cl28 == pytest.approx(100.0)
+        assert cl42 == pytest.approx(100.0)
+        assert acr == pytest.approx(7.0)
+
+    def test_single_day_acr_is_one_dynamic_denominator(self):
+        # Day 1 only: acute=100, chronic_28d=100/1=100 -> ACR=1.0
+        # (with /n denominator, 1 day -> chronic=100 not 100/28)
+        by_day = _by_day(1)
+        w_end = _window_end(1)
+        al, cl28, cl42, acr = compute_rolling_metrics(by_day, w_end)
+        assert al == pytest.approx(100.0)
+        assert cl28 == pytest.approx(100.0)  # /n: 1 day
+        assert acr == pytest.approx(1.0)  # 100/100
+
+    def test_empty_window_acr_none(self):
+        # Empty by_day -> all zeros -> ACR=None (spec: NULL if chronic=0)
+        al, cl28, cl42, acr = compute_rolling_metrics({}, _window_end(1))
+        assert al == 0.0
+        assert cl28 == 0.0
+        assert acr is None
+
+    def test_28_days_full_window(self):
+        # 28 days @100: acute=700 (last 7), chronic_28d=100, ACR=7.0
+        by_day = _by_day(28)
+        w_end = _window_end(28)
+        al, cl28, cl42, acr = compute_rolling_metrics(by_day, w_end)
+        assert al == pytest.approx(700.0)
+        assert cl28 == pytest.approx(100.0)
+        assert acr == pytest.approx(7.0)
+
+    def test_42_days_all_windows_populated(self):
+        # 42 days @100: acute=700, chronic_28d=100, chronic_42d=100, ACR=7.0
+        by_day = _by_day(42)
+        w_end = _window_end(42)
+        al, cl28, cl42, acr = compute_rolling_metrics(by_day, w_end)
+        assert al == pytest.approx(700.0)
+        assert cl28 == pytest.approx(100.0)
+        assert cl42 == pytest.approx(100.0)
+        assert acr == pytest.approx(7.0)
+
+    def test_partial_window_dynamic_denominator_adr16(self):
+        # ADR-16: 3 days @100 in a 42d window -> chronic_28d=100/3=100,
+        # not 300/28=10.7. Proves the pure function is used (not inline /28).
+        by_day = _by_day(3)
+        w_end = _window_end(3)
+        al, cl28, cl42, acr = compute_rolling_metrics(by_day, w_end)
+        assert cl28 == pytest.approx(100.0), (
+            f"chronic_28d must be 100.0 (300/3, /n denominator); got {cl28}"
+        )
+
+
+# --- daily_load = sum of session_load on a day -----------------------------
+
+
+class TestSumLoads:
+    def test_single_value(self):
+        assert sum_loads([100.0]) == 100.0
+
+    def test_multiple_values(self):
+        # spec: daily_load(d) = sum(session_load on day d)
+        assert sum_loads([100.0, 200.0, 300.0]) == 600.0
+
+    def test_empty_is_zero(self):
+        assert sum_loads([]) == 0.0
+
+    def test_nan_raises(self):
+        # NaN guard: a NaN session_load must not silently corrupt a daily sum;
+        # the Flink layer routes NaN to the DLQ. The pure sum surfaces it loudly.
+        with pytest.raises(ValueError):
+            sum_loads([100.0, float("nan")])
+
+    def test_inf_raises(self):
+        with pytest.raises(ValueError):
+            sum_loads([100.0, float("inf")])
+
+
+# --- acute_load = 7-day rolling SUM ----------------------------------------
+
+
+class TestAcuteLoad:
+    def test_seven_days_of_100_is_700(self):
+        # spec ACR scenario: acute_load=700
+        daily = [100.0] * ACUTE_WINDOW_DAYS
+        assert acute_load(daily) == 700.0
+
+    def test_six_days_excluded(self):
+        # acute is a SUM over exactly the 7 daily loads passed in
+        daily = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]
+        assert acute_load(daily) == 280.0
+
+    def test_empty_window_is_zero(self):
+        assert acute_load([]) == 0.0
+
+
+# --- chronic_load = rolling AVERAGE ----------------------------------------
+
+
+class TestChronicLoad:
+    def test_28d_average_of_100_is_100(self):
+        daily = [100.0] * CHRONIC_28D_WINDOW_DAYS
+        assert chronic_load(daily) == 100.0
+
+    def test_42d_average_of_100_is_100(self):
+        daily = [100.0] * CHRONIC_42D_WINDOW_DAYS
+        assert chronic_load(daily) == 100.0
+
+    def test_28d_average_mixed(self):
+        # sum=2800 over 28 days -> avg=100
+        daily = [100.0] * 28
+        assert chronic_load(daily) == 100.0
+
+    def test_28d_with_one_outlier(self):
+        # 27 days of 100 + 1 day of 2800 -> sum=5500 -> avg=5500/28=196.43
+        daily = [100.0] * 27 + [2800.0]
+        assert chronic_load(daily) == pytest.approx(5500.0 / 28.0)
+
+    def test_empty_average_is_zero(self):
+        # avoid div-by-zero: empty window -> 0.0 (no chronic baseline yet)
+        assert chronic_load([]) == 0.0
+
+    # --- ADR-16 partial-window tests (dynamic /n denominator) ---------------
+    # chronic_load uses a DYNAMIC denominator /n (days present), NOT fixed /28
+    # or /42. Sports-science rationale: a new athlete with few training days
+    # must not get an artificially depressed chronic baseline (fixed /28 would
+    # produce chronic=300/28≈10.7 when only 3 days exist, inflating ACR to
+    # implausible levels and triggering false deload alerts). The dynamic
+    # denominator reflects the athlete's ACTUAL average load over the days
+    # present, making ACR meaningful from day 1. See ADR-16 in design.md.
+
+    def test_partial_28d_window_3_days_dynamic_denominator(self):
+        # ADR-16: 3 days @100 -> chronic = 300/3 = 100 (NOT 300/28 ≈ 10.7).
+        # Proves the formula is /n, not /28, for a new athlete's first days.
+        result = chronic_load([100.0] * 3)
+        assert result == pytest.approx(100.0), (
+            f"chronic_load([100]*3) must be 100.0 (300/3, dynamic /n); "
+            f"got {result} (if ≈10.7 the formula incorrectly uses /28)"
+        )
+
+    def test_partial_28d_window_27_days_dynamic_denominator(self):
+        # ADR-16: 27 days @100 -> chronic = 2700/27 = 100 (NOT 2700/28 ≈ 96.4).
+        result = chronic_load([100.0] * 27)
+        assert result == pytest.approx(100.0), (
+            f"chronic_load([100]*27) must be 100.0 (2700/27, dynamic /n); "
+            f"got {result} (if ≈96.4 the formula incorrectly uses /28)"
+        )
+
+    def test_partial_42d_window_3_days_dynamic_denominator(self):
+        # ADR-16: 3 days @100 -> chronic = 300/3 = 100 (same function, 42d caller).
+        # The function is window-size agnostic; the caller passes n days from
+        # whichever window (28d or 42d). /n holds for both.
+        result = chronic_load([100.0] * 3)
+        assert result == pytest.approx(100.0)
+
+    def test_partial_42d_window_27_days_dynamic_denominator(self):
+        # ADR-16: 27 days in a 42d window -> chronic = 2700/27 = 100 (NOT /42).
+        result = chronic_load([100.0] * 27)
+        assert result == pytest.approx(100.0)
+
+
+# --- acute_chronic_ratio = acute / chronic_28d (NULL if chronic=0) ---------
+
+
+class TestAcuteChronicRatio:
+    def test_spec_scenario_700_over_500_is_1_4(self):
+        # spec "Scenario: ACR computation": acute=700, chronic=500 -> ACR=1.4
+        assert acute_chronic_ratio(700.0, 500.0) == pytest.approx(1.4)
+
+    def test_chronic_zero_returns_none(self):
+        # spec: NULL if chronic_load_28d = 0
+        assert acute_chronic_ratio(700.0, 0.0) is None
+
+    def test_exact_threshold_not_breach(self):
+        # ACR exactly 1.3 is NOT > 1.3 (strict); ratio still computed
+        assert acute_chronic_ratio(130.0, 100.0) == pytest.approx(1.3)
+
+
+# --- ACR None propagation (chronic=0 -> deload resets, no false DELOAD_LOW) -
+
+
+class TestAcrNoneDeloadReset:
+    def test_chronic_zero_deload_state_resets(self):
+        # CRITICAL C3+F2: When ACR is None (chronic==0, guaranteed on athlete
+        # day 1), the deload state machine MUST reset (count=0, sign=NORMAL,
+        # flag=NORMAL). It must NOT assert a DELOAD_LOW (-1) streak, which
+        # would otherwise happen if None were coerced to 0.0 < 0.8.
+        count, sign, flag = update_deload_state(0, DELOAD_NORMAL, None)
+        assert flag == DELOAD_NORMAL, (
+            f"ACR=None (chronic=0) must yield DELOAD_NORMAL, got flag={flag}. "
+            "None must NOT be treated as 0.0 < 0.8 (false DELOAD_LOW)."
+        )
+        assert count == 0
+        assert sign == DELOAD_NORMAL
+
+    def test_three_days_chronic_zero_no_deload_low(self):
+        # A new athlete's first 3 days all have chronic=0 -> ACR=None for each.
+        # Running the state machine must NOT produce DELOAD_LOW on day 3.
+        flags = compute_deload_flags([None, None, None])
+        assert all(f == DELOAD_NORMAL for f in flags), (
+            f"New athlete with 3 None-ACR days must have all NORMAL flags; "
+            f"got {flags}. False DELOAD_LOW streak detected."
+        )
+
+    def test_none_acr_resets_existing_streak_then_high_restarts(self):
+        # High streak of 2 days, then chronic=0 (None ACR), then high again.
+        # The None day resets the streak; new streak starts from 1.
+        # After the None: [high, high, None, high, high, high] -> trigger on day 6.
+        flags = compute_deload_flags([1.4, 1.4, None, 1.4, 1.4, 1.4])
+        assert flags[2] == DELOAD_NORMAL, "None-ACR day must be NORMAL"
+        assert flags[5] == DELOAD_HIGH, "3rd consecutive high after reset must trigger"
+
+
+# --- deload state machine (consecutive-day rule) ---------------------------
+
+
+class TestUpdateDeloadState:
+    def test_first_high_breach_no_flag(self):
+        # 1 day of ACR>1.3 -> count=1, sign=+1, flag=0 (need 3)
+        count, sign, flag = update_deload_state(0, 0, 1.4)
+        assert (count, sign, flag) == (1, DELOAD_HIGH, DELOAD_NORMAL)
+
+    def test_second_high_breach_no_flag(self):
+        count, sign, flag = update_deload_state(1, DELOAD_HIGH, 1.4)
+        assert (count, sign, flag) == (2, DELOAD_HIGH, DELOAD_NORMAL)
+
+    def test_third_high_breach_triggers_plus_one(self):
+        # spec: +1 if ACR>1.3 for >=3 consecutive days
+        count, sign, flag = update_deload_state(2, DELOAD_HIGH, 1.4)
+        assert (count, sign, flag) == (3, DELOAD_HIGH, DELOAD_HIGH)
+
+    def test_third_low_breach_triggers_minus_one(self):
+        # spec: -1 if ACR<0.8 for >=3 consecutive days
+        count, sign, flag = update_deload_state(2, DELOAD_LOW, 0.7)
+        assert (count, sign, flag) == (3, DELOAD_LOW, DELOAD_LOW)
+
+    def test_normal_resets_streak(self):
+        # a normal day between breaches resets the counter
+        count, sign, flag = update_deload_state(2, DELOAD_HIGH, 1.0)
+        assert (count, sign, flag) == (0, DELOAD_NORMAL, DELOAD_NORMAL)
+
+    def test_sign_flip_resets_count(self):
+        # going from a high streak to a low day starts a fresh low streak
+        count, sign, flag = update_deload_state(2, DELOAD_HIGH, 0.7)
+        assert (count, sign, flag) == (1, DELOAD_LOW, DELOAD_NORMAL)
+
+    def test_none_acr_resets(self):
+        # chronic=0 -> ACR None -> cannot assert a breach -> reset
+        count, sign, flag = update_deload_state(2, DELOAD_HIGH, None)
+        assert (count, sign, flag) == (0, DELOAD_NORMAL, DELOAD_NORMAL)
+
+    def test_acr_exact_1_3_is_normal(self):
+        # strict >: 1.3 is not a high breach
+        count, sign, flag = update_deload_state(0, 0, 1.3)
+        assert sign == DELOAD_NORMAL
+
+    def test_acr_exact_0_8_is_normal(self):
+        # strict <: 0.8 is not a low breach
+        count, sign, flag = update_deload_state(0, 0, 0.8)
+        assert sign == DELOAD_NORMAL
+
+    def test_continuation_stays_plus_one(self):
+        # 4th consecutive high day -> still +1 (streak continues)
+        count, sign, flag = update_deload_state(3, DELOAD_HIGH, 1.4)
+        assert (count, sign, flag) == (4, DELOAD_HIGH, DELOAD_HIGH)
+
+
+class TestComputeDeloadFlags:
+    def test_three_consecutive_high_triggers_on_day_three(self):
+        # spec "Scenario: Deload flag triggered": ACR>1.3 on days 18,19,20
+        # -> deload_flag=+1 on day 20
+        flags = compute_deload_flags([1.4, 1.4, 1.4])
+        assert flags == [0, 0, DELOAD_HIGH]
+
+    def test_three_consecutive_low_triggers_minus_one(self):
+        flags = compute_deload_flags([0.7, 0.7, 0.7])
+        assert flags == [0, 0, DELOAD_LOW]
+
+    def test_broken_streak_does_not_trigger(self):
+        # high, high, normal, high, high, high -> triggers on the 6th (3 fresh)
+        flags = compute_deload_flags([1.4, 1.4, 1.0, 1.4, 1.4, 1.4])
+        assert flags == [0, 0, 0, 0, 0, DELOAD_HIGH]
+
+    def test_all_normal(self):
+        flags = compute_deload_flags([1.0, 1.1, 0.9, 1.2])
+        assert flags == [0, 0, 0, 0]
+
+    def test_none_acr_resets_streak(self):
+        # high, high, None (chronic=0), high, high, high -> trigger on day 6
+        flags = compute_deload_flags([1.4, 1.4, None, 1.4, 1.4, 1.4])
+        assert flags == [0, 0, 0, 0, 0, DELOAD_HIGH]
+
+    def test_continuation_emits_plus_one_each_day(self):
+        flags = compute_deload_flags([1.4, 1.4, 1.4, 1.4, 1.4])
+        assert flags == [0, 0, DELOAD_HIGH, DELOAD_HIGH, DELOAD_HIGH]
+
+    def test_empty(self):
+        assert compute_deload_flags([]) == []
+
+
+# --- is_finite_load (NaN guard helper) -------------------------------------
+
+
+class TestIsFiniteLoad:
+    def test_finite_float(self):
+        assert is_finite_load(100.0) is True
+
+    def test_finite_int(self):
+        assert is_finite_load(100) is True
+
+    def test_nan(self):
+        assert is_finite_load(float("nan")) is False
+
+    def test_pos_inf(self):
+        assert is_finite_load(float("inf")) is False
+
+    def test_neg_inf(self):
+        assert is_finite_load(float("-inf")) is False
+
+    def test_none(self):
+        assert is_finite_load(None) is False
+
+    def test_bool_rejected(self):
+        # bool is an int subclass; a session_load must be a real number, not a flag
+        assert is_finite_load(True) is False
+
+
+# --- constant sanity (guards against accidental spec drift) ----------------
+
+
+class TestConstants:
+    def test_millis_per_day(self):
+        assert MILLIS_PER_DAY == 86_400_000
+
+    def test_window_sizes(self):
+        assert ACUTE_WINDOW_DAYS == 7
+        assert CHRONIC_28D_WINDOW_DAYS == 28
+        assert CHRONIC_42D_WINDOW_DAYS == 42
+
+    def test_deload_flags(self):
+        assert DELOAD_HIGH == 1
+        assert DELOAD_LOW == -1
+        assert DELOAD_NORMAL == 0
+
+
+# --- DLQ envelope (spec shape) --------------------------------------------
+
+
+class TestMetricsDlqEnvelope:
+    def test_nan_guard_envelope(self):
+        env = build_metrics_dlq_envelope(
+            original_key="athlete-1",
+            original_value=b'{"session_load": "NaN"}',
+            error_type=VALIDATION_FAILURE,
+            error_message="session_load is NaN",
+            timestamp=1_700_000_000_000,
+        )
+        assert env["original_topic"] == METRICS_SOURCE_TOPIC
+        assert env["original_key"] == "athlete-1"
+        assert env["error_type"] == VALIDATION_FAILURE
+        assert env["error_message"] == "session_load is NaN"
+        assert env["timestamp"] == 1_700_000_000_000
+        # original_value is base64 of the bytes
+        import base64
+
+        assert base64.b64decode(env["original_value"]) == b'{"session_load": "NaN"}'
+
+    def test_late_data_envelope(self):
+        env = build_metrics_dlq_envelope(
+            original_key="athlete-1",
+            original_value="late-row",
+            error_type=LATE_DATA,
+            error_message="event arrived past window-end + 24h allowed lateness",
+            timestamp=1_700_000_000_001,
+        )
+        assert env["error_type"] == LATE_DATA
+
+    def test_none_original_value_is_empty_string(self):
+        env = build_metrics_dlq_envelope(
+            original_key=None,
+            original_value=None,
+            error_type=VALIDATION_FAILURE,
+            error_message="missing",
+            timestamp=1,
+        )
+        assert env["original_value"] == ""
+        assert env["original_key"] is None
+
+
+# --- metrics_row_to_json (NF-2: RFC-8259-safe JSON serialization) ----------
+
+
+class TestMetricsRowToJson:
+    """Prove metrics_row_to_json() produces valid RFC 8259 JSON.
+
+    NF-2 (CRITICAL): The previous implementation used json.dumps default
+    allow_nan=True, which emits the non-standard tokens `NaN` and `Infinity`
+    for non-finite float values -- invalid per RFC 8259. The PostgreSQL
+    consumer in PR5 would crash on any such message.
+
+    Fix: metrics_row_to_json uses allow_nan=False so any non-finite numeric
+    value raises ValueError immediately (fail-fast -> DLQ), rather than
+    emitting a poison message to the metrics stream.
+    """
+
+    def test_finite_values_produce_valid_json(self):
+        # Happy path: all-finite inputs round-trip through json.loads cleanly.
+        result = metrics_row_to_json(
+            athlete_id="ath-1",
+            metric_date=1_700_000_000_000,
+            acute_load_val=700.0,
+            chronic_load_28d_val=100.0,
+            chronic_load_42d_val=100.0,
+            acr_val=7.0,
+            deload_flag=0,
+        )
+        parsed = json.loads(result)  # raises if invalid JSON
+        assert parsed["athlete_id"] == "ath-1"
+        assert parsed["acute_load"] == pytest.approx(700.0)
+        assert parsed["chronic_load_28d"] == pytest.approx(100.0)
+        assert parsed["chronic_load_42d"] == pytest.approx(100.0)
+        assert parsed["acute_chronic_ratio"] == pytest.approx(7.0)
+        assert parsed["deload_flag"] == 0
+
+    def test_none_acr_serializes_as_json_null(self):
+        # ACR=None (chronic=0) must become JSON null, not the string "None".
+        result = metrics_row_to_json(
+            athlete_id="ath-2",
+            metric_date=1_700_000_000_000,
+            acute_load_val=100.0,
+            chronic_load_28d_val=0.0,
+            chronic_load_42d_val=0.0,
+            acr_val=None,
+            deload_flag=0,
+        )
+        parsed = json.loads(result)
+        assert parsed["acute_chronic_ratio"] is None
+
+    def test_nan_acr_already_guarded_to_null(self):
+        # NaN ACR (IEEE-754 sentinel from prior guard) must become JSON null.
+        result = metrics_row_to_json(
+            athlete_id="ath-3",
+            metric_date=1_700_000_000_000,
+            acute_load_val=100.0,
+            chronic_load_28d_val=0.0,
+            chronic_load_42d_val=0.0,
+            acr_val=float("nan"),
+            deload_flag=0,
+        )
+        parsed = json.loads(result)
+        assert parsed["acute_chronic_ratio"] is None
+
+    def test_nan_acute_load_raises_value_error(self):
+        # NF-2 core: a non-finite load field must raise ValueError (fail-fast
+        # -> DLQ) rather than emitting the non-standard `NaN` token.
+        with pytest.raises(ValueError):
+            metrics_row_to_json(
+                athlete_id="ath-4",
+                metric_date=1_700_000_000_000,
+                acute_load_val=float("nan"),
+                chronic_load_28d_val=100.0,
+                chronic_load_42d_val=100.0,
+                acr_val=None,
+                deload_flag=0,
+            )
+
+    def test_nan_chronic_load_28d_raises_value_error(self):
+        # Non-finite chronic_load_28d must fail fast, not emit `NaN`.
+        with pytest.raises(ValueError):
+            metrics_row_to_json(
+                athlete_id="ath-5",
+                metric_date=1_700_000_000_000,
+                acute_load_val=100.0,
+                chronic_load_28d_val=float("nan"),
+                chronic_load_42d_val=100.0,
+                acr_val=None,
+                deload_flag=0,
+            )
+
+    def test_nan_chronic_load_42d_raises_value_error(self):
+        # Non-finite chronic_load_42d must fail fast, not emit `NaN`.
+        with pytest.raises(ValueError):
+            metrics_row_to_json(
+                athlete_id="ath-6",
+                metric_date=1_700_000_000_000,
+                acute_load_val=100.0,
+                chronic_load_28d_val=100.0,
+                chronic_load_42d_val=float("nan"),
+                acr_val=None,
+                deload_flag=0,
+            )
+
+    def test_inf_acute_load_raises_value_error(self):
+        # +Inf (also non-standard JSON) must fail fast via allow_nan=False.
+        with pytest.raises(ValueError):
+            metrics_row_to_json(
+                athlete_id="ath-7",
+                metric_date=1_700_000_000_000,
+                acute_load_val=float("inf"),
+                chronic_load_28d_val=100.0,
+                chronic_load_42d_val=100.0,
+                acr_val=None,
+                deload_flag=0,
+            )
+
+    def test_output_is_valid_rfc8259_json(self):
+        # Triangulation: use different field values; json.loads is the RFC 8259
+        # parser -- success proves no NaN/Infinity token was emitted.
+        result = metrics_row_to_json(
+            athlete_id="ath-8",
+            metric_date=1_000_000_000_000,
+            acute_load_val=350.5,
+            chronic_load_28d_val=250.25,
+            chronic_load_42d_val=275.0,
+            acr_val=1.4,
+            deload_flag=1,
+        )
+        parsed = json.loads(result)  # raises json.JSONDecodeError if invalid
+        assert parsed["deload_flag"] == 1
+        assert parsed["metric_date"] == 1_000_000_000_000

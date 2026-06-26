@@ -40,6 +40,8 @@ data/samples/lake/
 checkpoints/
 savepoints/
 flink-logs/
+# Per-run integration-test checkpoint dirs (e.g. tests/integration/_checkpoints_<runid>/)
+_checkpoints_*/
 
 # Local agent/tooling caches (not project artifacts)
 .atl/
