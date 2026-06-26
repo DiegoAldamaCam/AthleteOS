@@ -539,15 +539,20 @@ CREATE TABLE canonical_training_event_source (
             if not is_finite_load(session_load):
                 # NaN/Inf guard (task 5.4): route to DLQ, mark seen, drop.
                 self._seen.update(True)
+                # Truncate the session_load value in the error message to avoid
+                # embedding unbounded repr() strings in DLQ payloads. (WARNING)
+                sl_repr = repr(session_load)
+                if len(sl_repr) > 80:
+                    sl_repr = sl_repr[:77] + "..."
                 yield dlq_nan_tag, json.dumps(
                     build_metrics_dlq_envelope(
                         original_key=value[IDX_ATHLETE_ID],
                         original_value=json.dumps(
                             {"event_id": value[IDX_EVENT_ID],
-                             "session_load": session_load}
+                             "session_load_type": type(session_load).__name__}
                         ),
                         error_type=VALIDATION_FAILURE,
-                        error_message=f"session_load is not finite: {session_load!r}",
+                        error_message=f"session_load not finite [{type(session_load).__name__}]: {sl_repr}",
                         timestamp=epoch_ms_now(),
                     )
                 )
@@ -826,6 +831,15 @@ CREATE TABLE canonical_training_event_source (
 
 
 def main() -> int:  # pragma: no cover - entrypoint
+    # REQUIRED ENV VARS (WARNING W3 — insecure defaults):
+    # KAFKA_BOOTSTRAP_SERVERS — must use SASL/SSL in production (not plaintext
+    #   kafka:9092). Recommended: "broker:9092" with KAFKA_SECURITY_PROTOCOL=SSL
+    #   and KAFKA_SASL_* env vars passed to the Flink job via cluster config.
+    # SCHEMA_REGISTRY_URL — must use HTTPS in production.
+    #   http://schema-registry:8081 is the local Docker Compose dev default only.
+    # Missing either var in production means the job connects to the wrong broker
+    # or exposes credentials; the defaults here are intentionally local-dev values
+    # so the error is visible (wrong broker) rather than silently secure.
     bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
     registry = os.environ.get("SCHEMA_REGISTRY_URL", "http://schema-registry:8081")
     group = os.environ.get("METRICS_GROUP_ID", "metrics-training-event")

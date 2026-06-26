@@ -160,7 +160,9 @@ _ATHLETE_ID = "athlete-m1"
 # Base day = 2024-01-01 00:00 UTC (a Kafka/event-time day boundary, UTC).
 _BASE_DT = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 _BASE_MS = int(_BASE_DT.timestamp() * 1000)
-_MS_PER_DAY = 24 * 60 * 60 * 1000
+# Import the canonical MILLIS_PER_DAY from compute.py (single source of truth).
+# (WARNING W2: avoid duplicating the constant in 3 places)
+from jobs.metrics.compute import MILLIS_PER_DAY as _MS_PER_DAY  # noqa: E402
 
 # Number of in-window normal days (days 1..N_NORMAL_DAYS, ascending event_time).
 # Must be >= 3 so the watermark driven by day-N events passes day-1's
