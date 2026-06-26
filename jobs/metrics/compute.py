@@ -275,6 +275,57 @@ def compute_rolling_metrics(
     return al, cl28, cl42, acr
 
 
+# --- Metrics-row JSON serialization (RFC 8259 safe) ----------------------
+#
+# Extracted from main.py's inner _metrics_row_to_json closure so the
+# serialization logic is unit-testable and pyflink-free.
+#
+# NF-2 fix: use allow_nan=False so any non-finite numeric value raises
+# ValueError immediately (fail-fast to DLQ) instead of emitting the
+# non-standard `NaN` / `Infinity` tokens that violate RFC 8259 and crash
+# PR5's PostgreSQL consumer.  ACR is guarded to None before this call
+# (chronic==0 sentinel), so None/nan ACR becomes JSON null cleanly.
+
+
+def metrics_row_to_json(
+    *,
+    athlete_id: str,
+    metric_date: int,
+    acute_load_val: float,
+    chronic_load_28d_val: float,
+    chronic_load_42d_val: float,
+    acr_val: "float | None",
+    deload_flag: int,
+) -> str:
+    """Serialize one metrics row to a RFC 8259-compliant JSON string.
+
+    Raises ValueError for any non-finite load field (NaN, +/-Inf) so the
+    caller (Flink map operator) routes the record to the DLQ rather than
+    emitting an invalid JSON token to the metrics stream.
+
+    ACR is allowed to be None (chronic==0) or float('nan') (IEEE-754 sentinel
+    from the upstream guard); both are serialized as JSON null.
+    """
+    # Guard ACR: None and NaN both become null in JSON.
+    if acr_val is None or (isinstance(acr_val, float) and math.isnan(acr_val)):
+        acr_json: "float | None" = None
+    else:
+        acr_json = float(acr_val)
+
+    payload = {
+        "athlete_id": athlete_id,
+        "metric_date": metric_date,
+        "acute_load": acute_load_val,
+        "chronic_load_28d": chronic_load_28d_val,
+        "chronic_load_42d": chronic_load_42d_val,
+        "acute_chronic_ratio": acr_json,
+        "deload_flag": deload_flag,
+    }
+    # allow_nan=False enforces RFC 8259: any non-finite float raises ValueError
+    # so the Flink operator can route the record to the DLQ (fail-fast).
+    return json.dumps(payload, allow_nan=False)
+
+
 # --- DLQ error envelope (spec "DLQ Error Envelope") -----------------------
 
 

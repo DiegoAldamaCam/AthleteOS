@@ -373,6 +373,7 @@ def run(config: MetricsJobConfig) -> None:  # pragma: no cover - flink runtime
         compute_rolling_metrics,
         epoch_ms_now,
         is_finite_load,
+        metrics_row_to_json,
         update_deload_state,
     )
 
@@ -809,18 +810,19 @@ CREATE TABLE canonical_training_event_source (
     # PR4 outputs a metrics DataStream to a staging Kafka topic (JSON,
     # AT_LEAST_ONCE). The PostgreSQL + Iceberg exactly-once sinks are PR5.
     def _metrics_row_to_json(row: Any) -> str:
-        acr_v = row[IDX_ACR]
-        # NaN ACR (chronic==0) serializes as JSON null (C3+F2).
-        acr_json = None if (acr_v is None or (isinstance(acr_v, float) and math.isnan(acr_v))) else float(acr_v)
-        return json.dumps({
-            "athlete_id": row[IDX_ACR_ATHLETE_ID],
-            "metric_date": row[IDX_ACR_METRIC_DATE],
-            "acute_load": row[IDX_ACR_ACUTE],
-            "chronic_load_28d": row[IDX_ACR_CHRONIC_28D],
-            "chronic_load_42d": row[IDX_ACR_CHRONIC_42D],
-            "acute_chronic_ratio": acr_json,
-            "deload_flag": row[IDX_METRICS_DELOAD_FLAG],
-        })
+        # Delegate to the pure, unit-tested helper in compute.py.
+        # NF-2: allow_nan=False inside metrics_row_to_json ensures non-finite
+        # load fields raise ValueError (fail-fast to DLQ) instead of emitting
+        # the non-standard `NaN`/`Infinity` tokens that violate RFC 8259.
+        return metrics_row_to_json(
+            athlete_id=row[IDX_ACR_ATHLETE_ID],
+            metric_date=row[IDX_ACR_METRIC_DATE],
+            acute_load_val=row[IDX_ACR_ACUTE],
+            chronic_load_28d_val=row[IDX_ACR_CHRONIC_28D],
+            chronic_load_42d_val=row[IDX_ACR_CHRONIC_42D],
+            acr_val=row[IDX_ACR],
+            deload_flag=row[IDX_METRICS_DELOAD_FLAG],
+        )
 
     metrics_json_stream = metrics_stream.map(
         _metrics_row_to_json, output_type=Types.STRING()

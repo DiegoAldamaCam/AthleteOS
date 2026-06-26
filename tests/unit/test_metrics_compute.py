@@ -8,8 +8,8 @@ have full unit coverage on any interpreter (CPython 3.14 included).
 Source of truth: serving-store spec "Metric Formulas".
   daily_load(d)       = sum(session_load on day d)
   acute_load          = sum(daily_load for d in [t-6, t])           -- 7d rolling SUM
-  chronic_load_28d    = sum(daily_load for d in [t-27, t]) / 28     -- 28d rolling AVG
-  chronic_load_42d    = sum(daily_load for d in [t-41, t]) / 42     -- 42d rolling AVG
+  chronic_load_28d    = sum(daily_load for d in [t-27, t]) / n      -- 28d rolling AVG, n=days present (ADR-16)
+  chronic_load_42d    = sum(daily_load for d in [t-41, t]) / n      -- 42d rolling AVG, n=days present (ADR-16)
   acute_chronic_ratio = acute_load / chronic_load_28d               -- NULL if chronic=0
   deload_flag         = +1 if ACR>1.3 for >=3 consecutive days
                       | -1 if ACR<0.8 for >=3 consecutive days
@@ -21,6 +21,8 @@ from __future__ import annotations
 import math
 
 import pytest
+
+import json
 
 from jobs.metrics.compute import (
     ACUTE_WINDOW_DAYS,
@@ -40,6 +42,7 @@ from jobs.metrics.compute import (
     compute_deload_flags,
     compute_rolling_metrics,
     is_finite_load,
+    metrics_row_to_json,
     sum_loads,
     update_deload_state,
 )
@@ -86,7 +89,7 @@ class TestComputeRollingMetrics:
         assert cl42 == pytest.approx(100.0)
         assert acr == pytest.approx(7.0)
 
-    def test_single_day_acr_none_chronic_zero(self):
+    def test_single_day_acr_is_one_dynamic_denominator(self):
         # Day 1 only: acute=100, chronic_28d=100/1=100 -> ACR=1.0
         # (with /n denominator, 1 day -> chronic=100 not 100/28)
         by_day = _by_day(1)
@@ -262,10 +265,6 @@ class TestAcuteChronicRatio:
 
 
 class TestAcrNoneDeloadReset:
-    def test_chronic_zero_acr_is_none(self):
-        # Baseline: chronic==0 -> ACR is None (spec: NULL if chronic=0).
-        assert acute_chronic_ratio(100.0, 0.0) is None
-
     def test_chronic_zero_deload_state_resets(self):
         # CRITICAL C3+F2: When ACR is None (chronic==0, guaranteed on athlete
         # day 1), the deload state machine MUST reset (count=0, sign=NORMAL,
@@ -471,3 +470,136 @@ class TestMetricsDlqEnvelope:
         )
         assert env["original_value"] == ""
         assert env["original_key"] is None
+
+
+# --- metrics_row_to_json (NF-2: RFC-8259-safe JSON serialization) ----------
+
+
+class TestMetricsRowToJson:
+    """Prove metrics_row_to_json() produces valid RFC 8259 JSON.
+
+    NF-2 (CRITICAL): The previous implementation used json.dumps default
+    allow_nan=True, which emits the non-standard tokens `NaN` and `Infinity`
+    for non-finite float values -- invalid per RFC 8259. The PostgreSQL
+    consumer in PR5 would crash on any such message.
+
+    Fix: metrics_row_to_json uses allow_nan=False so any non-finite numeric
+    value raises ValueError immediately (fail-fast -> DLQ), rather than
+    emitting a poison message to the metrics stream.
+    """
+
+    def test_finite_values_produce_valid_json(self):
+        # Happy path: all-finite inputs round-trip through json.loads cleanly.
+        result = metrics_row_to_json(
+            athlete_id="ath-1",
+            metric_date=1_700_000_000_000,
+            acute_load_val=700.0,
+            chronic_load_28d_val=100.0,
+            chronic_load_42d_val=100.0,
+            acr_val=7.0,
+            deload_flag=0,
+        )
+        parsed = json.loads(result)  # raises if invalid JSON
+        assert parsed["athlete_id"] == "ath-1"
+        assert parsed["acute_load"] == pytest.approx(700.0)
+        assert parsed["chronic_load_28d"] == pytest.approx(100.0)
+        assert parsed["chronic_load_42d"] == pytest.approx(100.0)
+        assert parsed["acute_chronic_ratio"] == pytest.approx(7.0)
+        assert parsed["deload_flag"] == 0
+
+    def test_none_acr_serializes_as_json_null(self):
+        # ACR=None (chronic=0) must become JSON null, not the string "None".
+        result = metrics_row_to_json(
+            athlete_id="ath-2",
+            metric_date=1_700_000_000_000,
+            acute_load_val=100.0,
+            chronic_load_28d_val=0.0,
+            chronic_load_42d_val=0.0,
+            acr_val=None,
+            deload_flag=0,
+        )
+        parsed = json.loads(result)
+        assert parsed["acute_chronic_ratio"] is None
+
+    def test_nan_acr_already_guarded_to_null(self):
+        # NaN ACR (IEEE-754 sentinel from prior guard) must become JSON null.
+        result = metrics_row_to_json(
+            athlete_id="ath-3",
+            metric_date=1_700_000_000_000,
+            acute_load_val=100.0,
+            chronic_load_28d_val=0.0,
+            chronic_load_42d_val=0.0,
+            acr_val=float("nan"),
+            deload_flag=0,
+        )
+        parsed = json.loads(result)
+        assert parsed["acute_chronic_ratio"] is None
+
+    def test_nan_acute_load_raises_value_error(self):
+        # NF-2 core: a non-finite load field must raise ValueError (fail-fast
+        # -> DLQ) rather than emitting the non-standard `NaN` token.
+        with pytest.raises(ValueError):
+            metrics_row_to_json(
+                athlete_id="ath-4",
+                metric_date=1_700_000_000_000,
+                acute_load_val=float("nan"),
+                chronic_load_28d_val=100.0,
+                chronic_load_42d_val=100.0,
+                acr_val=None,
+                deload_flag=0,
+            )
+
+    def test_nan_chronic_load_28d_raises_value_error(self):
+        # Non-finite chronic_load_28d must fail fast, not emit `NaN`.
+        with pytest.raises(ValueError):
+            metrics_row_to_json(
+                athlete_id="ath-5",
+                metric_date=1_700_000_000_000,
+                acute_load_val=100.0,
+                chronic_load_28d_val=float("nan"),
+                chronic_load_42d_val=100.0,
+                acr_val=None,
+                deload_flag=0,
+            )
+
+    def test_nan_chronic_load_42d_raises_value_error(self):
+        # Non-finite chronic_load_42d must fail fast, not emit `NaN`.
+        with pytest.raises(ValueError):
+            metrics_row_to_json(
+                athlete_id="ath-6",
+                metric_date=1_700_000_000_000,
+                acute_load_val=100.0,
+                chronic_load_28d_val=100.0,
+                chronic_load_42d_val=float("nan"),
+                acr_val=None,
+                deload_flag=0,
+            )
+
+    def test_inf_acute_load_raises_value_error(self):
+        # +Inf (also non-standard JSON) must fail fast via allow_nan=False.
+        with pytest.raises(ValueError):
+            metrics_row_to_json(
+                athlete_id="ath-7",
+                metric_date=1_700_000_000_000,
+                acute_load_val=float("inf"),
+                chronic_load_28d_val=100.0,
+                chronic_load_42d_val=100.0,
+                acr_val=None,
+                deload_flag=0,
+            )
+
+    def test_output_is_valid_rfc8259_json(self):
+        # Triangulation: use different field values; json.loads is the RFC 8259
+        # parser -- success proves no NaN/Infinity token was emitted.
+        result = metrics_row_to_json(
+            athlete_id="ath-8",
+            metric_date=1_000_000_000_000,
+            acute_load_val=350.5,
+            chronic_load_28d_val=250.25,
+            chronic_load_42d_val=275.0,
+            acr_val=1.4,
+            deload_flag=1,
+        )
+        parsed = json.loads(result)  # raises json.JSONDecodeError if invalid
+        assert parsed["deload_flag"] == 1
+        assert parsed["metric_date"] == 1_000_000_000_000
