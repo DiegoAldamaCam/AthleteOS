@@ -1,0 +1,79 @@
+# AthleteOS CI
+#
+# Two-job pipeline:
+#   unit        — fast gate on every push/PR to master (no Docker required)
+#   integration — Docker-backed testcontainers suite (ubuntu-latest has Docker pre-installed)
+#
+# Python is pinned to 3.11 exactly: apache-flink 1.19 ships wheels only for
+# CPython 3.8-3.11. Using 3.12+ would break the integration job at import time.
+
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# Cancel any in-progress run for the same ref so stacked pushes don't pile up.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: unit
+  # Fast (<1 min). Runs the pure-Python unit suite — no Docker, no network.
+  # Gates every push and PR to master.
+  # ---------------------------------------------------------------------------
+  unit:
+    name: Unit tests (Python 3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project (editable + dev extras)
+        run: pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: pytest tests/unit/ -v
+
+  # ---------------------------------------------------------------------------
+  # Job 2: integration
+  # Docker-backed. testcontainers starts a RedpandaContainer (Kafka + Schema
+  # Registry on 8081) and a PostgreSQL container inside the job — no external
+  # docker-compose required. Tests self-skip when Docker is unavailable, but
+  # ubuntu-latest runners always have a Docker daemon pre-installed.
+  #
+  # Timeout is set to 25 min so a hung container fails the job rather than
+  # consuming the full 6-hour GitHub limit.
+  # ---------------------------------------------------------------------------
+  integration:
+    name: Integration tests (Python 3.11 + Docker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project (editable + dev extras)
+        run: pip install -e ".[dev]"
+
+      - name: Run integration tests
+        run: pytest tests/integration/ -v
