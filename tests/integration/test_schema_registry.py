@@ -26,10 +26,41 @@ pytestmark = pytest.mark.integration
 
 @pytest.fixture
 def registry(redpanda_endpoints) -> dict:
-    """Register all schemas against the Redpanda-backed registry, return urls."""
+    """Register all schemas against the Redpanda-backed registry, return urls.
+
+    Yields the url dict and tears down all registered subjects after each test
+    so that a session-scoped Redpanda container does not bleed schema state
+    across test functions.
+    """
+    import time
+
     url = redpanda_endpoints["schema_registry_url"]
     register_all(url)
-    return {"url": url}
+    yield {"url": url}
+
+    # Teardown: delete every subject registered during this test so subsequent
+    # tests start from a clean slate against the same session-scoped container.
+    try:
+        subjects_resp = requests.get(f"{url}/subjects", timeout=10)
+        subjects = subjects_resp.json() if subjects_resp.ok else []
+    except Exception:
+        subjects = []
+
+    for subject in subjects:
+        # Soft delete first (removes from active listing).
+        try:
+            requests.delete(f"{url}/subjects/{subject}", timeout=10)
+        except Exception:
+            pass
+        # Hard (permanent) delete removes all schema data so re-registration
+        # in the next test does not see leftover state.
+        try:
+            requests.delete(f"{url}/subjects/{subject}?permanent=true", timeout=10)
+        except Exception:
+            pass
+
+    # Brief pause so the SR can flush deletes before the next test starts.
+    time.sleep(0.2)
 
 
 def test_each_canonical_schema_registers(registry):
@@ -62,14 +93,18 @@ def test_backward_compatibility_is_set_per_subject(registry):
 
 
 def test_incompatible_schema_is_rejected(registry):
-    """An incompatible v2 (removing a required field) is REJECTED under BACKWARD.
+    """An incompatible v2 (adding a required field with no default) is REJECTED under BACKWARD.
 
-    Mirrors the spec scenario: register TrainingEvent v1, then attempt v2 that
-    removes the required ``reps`` field -> 409 Conflict with a compatibility
-    error. BACKWARD means existing consumers (reader schema v1) must still be
-    able to read v2 data, so removing a field they expect is rejected.
+    BACKWARD compatibility means: a v2 *reader* must be able to read v1 *data*.
+    Adding a required field (non-nullable, no default) to v2 breaks this because
+    v1 data will not contain that field and the v2 reader has no default to fall
+    back on -> Schema Registry must reject the registration (409 or 422).
+
+    Note: *removing* a field is BACKWARD-compatible (the v2 reader simply ignores
+    the extra field present in v1 data). The old version of this test had the
+    semantics inverted — it removed a field and expected rejection, but SR
+    correctly returned 200.
     """
-    # Re-register TrainingEvent alone to get a known v1 baseline.
     url = registry["url"]
     subject = "canonical.training_event-value"
 
@@ -78,9 +113,10 @@ def test_incompatible_schema_is_rejected(registry):
     latest.raise_for_status()
     v1 = json.loads(latest.json()["schema"])
 
-    # Build an incompatible v2 by REMOVING a required field (session_load).
-    # `session_load` is non-nullable/required in v1 -> not backward compatible.
-    v2_fields = [f for f in v1["fields"] if f["name"] != "session_load"]
+    # Build an incompatible v2 by ADDING a required field with NO default.
+    # A v2 reader cannot read v1 data that lacks this field -> breaks BACKWARD.
+    new_required_field = {"name": "required_intensity_score", "type": "float"}
+    v2_fields = list(v1["fields"]) + [new_required_field]
     v2 = {"type": "record", "name": v1["name"], "namespace": v1["namespace"], "fields": v2_fields}
 
     resp = requests.post(
