@@ -20,11 +20,16 @@ authors = [{ name = "AthleteOS" }]
 # cleanly on other interpreters (jobs isolate pyflink behind lazy imports), but
 # the integration test that executes the PyFlink job requires 3.11.
 dependencies = [
-  "apache-flink>=1.19",
-  "confluent-kafka>=2.5",
-  "fastavro>=1.9",
-  "psycopg2-binary>=2.9",
-  "duckdb>=0.10",
+  # Data-pipeline deps are upper-bounded to the major/minor line the code targets.
+  # apache-flink is pinned to the 1.19 line: the PyFlink job code uses 1.19 APIs
+  # (set_restart_strategy, the bundled KafkaSink connector) that were removed/moved
+  # in 2.x. A clean install without this cap pulls 2.x and breaks every PyFlink job.
+  "apache-flink>=1.19,<1.20",
+  "confluent-kafka>=2.5,<3",
+  "fastavro>=1.9,<2",
+  "psycopg2-binary>=2.9,<3",
+  "duckdb>=0.10,<1",
+  # UI/API deps keep a floor only; minor bumps here are low-risk for this slice.
   "fastapi>=0.110",
   "uvicorn[standard]>=0.29",
   "streamlit>=1.33",
@@ -55,6 +60,6 @@ include = [
 ]
 exclude = ["tests*", "openspec*", "data*"]
 
-[tool.pytest.ini_options]
-# Mirrored in pytest.ini for environments that do not read pyproject.
-testpaths = ["tests"]
+# Pytest configuration lives in pytest.ini (single source of truth: markers,
+# python_files, addopts). Do not duplicate [tool.pytest.ini_options] here or
+# pytest emits "ignoring pytest config in pyproject.toml".
