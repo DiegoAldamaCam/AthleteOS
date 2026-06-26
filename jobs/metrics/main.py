@@ -77,6 +77,62 @@ are PR5 (Phase 6), NOT this PR. The env checkpointing is EXACTLY_ONCE (task
 5.1); the PR4 staging + DLQ sinks are AT_LEAST_ONCE (PG/Iceberg add
 exactly-once in PR5).
 
+Poison-record / deserialization crash-loop runbook (RESILIENCE F3)
+------------------------------------------------------------------
+Platform limitation: the ``avro-confluent`` Table source in PyFlink 1.19 does
+NOT support per-record exception routing to a side output. A Avro message that
+cannot be deserialized (wrong schema id, truncated bytes, corrupted magic byte)
+throws a job-level exception -> Flink restarts the job (configured: 3 tolerable
+failures + no_restart=False in production). If the poison record is always
+re-delivered from the same Kafka offset the job enters a crash-loop -> metrics
+outage.
+
+OPERATOR RUNBOOK (when the job crash-loops on a persistent DESERIALIZATION_ERROR):
+
+1. Identify the partition and offset from the Flink TaskManager logs:
+      grep "AvroDeserializationException\|DeserializationException" taskmanager.log
+   The log line includes the topic-partition and approximate offset.
+
+2. Skip the poison record using the Kafka Admin API or redpanda-console:
+      rpk topic alter-config canonical.training_event \
+        --set delete.retention.ms=1  # or use --set-offset on the consumer group
+
+   Alternative (preferred, non-destructive): advance the consumer group offset
+   past the bad record using the Kafka consumer-group CLI:
+      kafka-consumer-groups.sh \
+        --bootstrap-server $KAFKA_BOOTSTRAP_SERVERS \
+        --group metrics-training-event \
+        --reset-offsets --to-offset <bad_offset+1> \
+        --topic canonical.training_event:partition \
+        --execute
+
+3. Restart the Flink job from the latest checkpoint
+   (RETAIN_ON_CANCELLATION ensures checkpoints survive job cancellation).
+
+4. Inspect the raw bytes at the skipped offset in ``dlq.canonical.training_event``
+   or via direct Kafka consumer to diagnose the schema mismatch.
+
+5. Address root cause:
+   - Schema id mismatch: re-register the schema or fix the producer.
+   - Corrupted message: purge the topic partition from that offset if safe.
+
+Alerting: configure a Flink job-exception rate alert (threshold: >0 exceptions
+per minute) and a checkpoint-failure alert (threshold: >0 checkpoint failures
+in a 5-minute window). Both are leading indicators of a crash-loop before
+metrics outage occurs. See also observability counters in run() (PR4 scope).
+
+ADR-13 emit-on-update / ContinuousEventTimeTrigger gap (ACCEPTED)
+------------------------------------------------------------------
+ContinuousEventTimeTrigger.of(Time.days(1)) on a TumblingEventTimeWindows(1d)
+fires AT MOST once per event-time day, not intra-day. In practice this means
+the serving store only updates when a new event arrives on a new event-time day
+-- it does not fire within a day for the first event of that day before the day
+window closes. This is a gap vs. the ADR-13 freshness intent (within-day
+updates to PG). Accepted for PR4 scope: a true intra-day early-fire requires
+ContinuousEventTimeTrigger.of(Time.minutes(N)) where N << 1440, which changes
+the trigger interval and is a PR5+ tuning. The current behavior is documented
+here so it is not treated as a silent bug.
+
 Refs #1.
 """
 
