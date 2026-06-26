@@ -39,6 +39,22 @@ dev = [
   "requests>=2.31",
 ]
 
+# Explicit package discovery. Without this, setuptools flat-layout autodiscovery
+# fails on a clean environment ("Multiple top-level packages discovered") because
+# the repo root holds several top-level code packages plus non-code dirs (openspec,
+# tests, data). List only the real importable code packages and their subpackages.
+[tool.setuptools.packages.find]
+include = [
+  "jobs*",
+  "ingestion*",
+  "bootstrap*",
+  "storage*",
+  "schemas*",
+  "api*",
+  "ui*",
+]
+exclude = ["tests*", "openspec*", "data*"]
+
 [tool.pytest.ini_options]
 # Mirrored in pytest.ini for environments that do not read pyproject.
 testpaths = ["tests"]
