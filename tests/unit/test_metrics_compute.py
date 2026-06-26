@@ -169,6 +169,45 @@ class TestAcuteChronicRatio:
         assert acute_chronic_ratio(130.0, 100.0) == pytest.approx(1.3)
 
 
+# --- ACR None propagation (chronic=0 -> deload resets, no false DELOAD_LOW) -
+
+
+class TestAcrNoneDeloadReset:
+    def test_chronic_zero_acr_is_none(self):
+        # Baseline: chronic==0 -> ACR is None (spec: NULL if chronic=0).
+        assert acute_chronic_ratio(100.0, 0.0) is None
+
+    def test_chronic_zero_deload_state_resets(self):
+        # CRITICAL C3+F2: When ACR is None (chronic==0, guaranteed on athlete
+        # day 1), the deload state machine MUST reset (count=0, sign=NORMAL,
+        # flag=NORMAL). It must NOT assert a DELOAD_LOW (-1) streak, which
+        # would otherwise happen if None were coerced to 0.0 < 0.8.
+        count, sign, flag = update_deload_state(0, DELOAD_NORMAL, None)
+        assert flag == DELOAD_NORMAL, (
+            f"ACR=None (chronic=0) must yield DELOAD_NORMAL, got flag={flag}. "
+            "None must NOT be treated as 0.0 < 0.8 (false DELOAD_LOW)."
+        )
+        assert count == 0
+        assert sign == DELOAD_NORMAL
+
+    def test_three_days_chronic_zero_no_deload_low(self):
+        # A new athlete's first 3 days all have chronic=0 -> ACR=None for each.
+        # Running the state machine must NOT produce DELOAD_LOW on day 3.
+        flags = compute_deload_flags([None, None, None])
+        assert all(f == DELOAD_NORMAL for f in flags), (
+            f"New athlete with 3 None-ACR days must have all NORMAL flags; "
+            f"got {flags}. False DELOAD_LOW streak detected."
+        )
+
+    def test_none_acr_resets_existing_streak_then_high_restarts(self):
+        # High streak of 2 days, then chronic=0 (None ACR), then high again.
+        # The None day resets the streak; new streak starts from 1.
+        # After the None: [high, high, None, high, high, high] -> trigger on day 6.
+        flags = compute_deload_flags([1.4, 1.4, None, 1.4, 1.4, 1.4])
+        assert flags[2] == DELOAD_NORMAL, "None-ACR day must be NORMAL"
+        assert flags[5] == DELOAD_HIGH, "3rd consecutive high after reset must trigger"
+
+
 # --- deload state machine (consecutive-day rule) ---------------------------
 
 
