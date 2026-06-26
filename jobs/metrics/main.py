@@ -25,7 +25,7 @@ DataStream via ``to_data_stream``; the rest is DataStream event-time windowing:
       -> to_data_stream -> DataStream[Row]
       -> assign_timestamps_and_watermarks(24h out-of-orderness, event_time epoch-ms)
       -> key_by(event_id) -> DedupKeyedProcessFunction
-           ValueState<bool> per event_id, 7d TTL (LOCKED)
+           ValueState<int> per event_id (sentinel 1, is-None check), 7d TTL (LOCKED)
            NaN/Inf session_load -> DLQ side output (VALIDATION_FAILURE)
            main: yield Row (unchanged, record timestamp = event_time preserved)
       -> key_by(athlete_id)
@@ -206,7 +206,7 @@ DLQ_TOPIC = "dlq.canonical.training_event"
 METRICS_OUTPUT_TOPIC = "athlete.metrics.stream"
 SOURCE_NAME = "metrics-training-event-source"
 
-# Dedup ValueState<bool> per event_id, 7d TTL (LOCKED design).
+# Dedup ValueState<int> per event_id (sentinel 1, is-None check), 7d TTL (LOCKED design).
 DEDUP_TTL_DAYS = 7
 # Batch-ish canonical topic: bounded out-of-orderness = 24h (design).
 WATERMARK_OUT_OF_ORDER_HOURS = 24
@@ -620,7 +620,7 @@ CREATE TABLE canonical_training_event_source (
         )
     watermarked = canonical_stream.assign_timestamps_and_watermarks(watermark)
 
-    # --- dedup (ValueState<bool> per event_id, 7d TTL) + NaN guard ----------
+    # --- dedup (ValueState<int> per event_id, sentinel 1, 7d TTL) + NaN guard ----------
     class DedupAndGuardFunction(KeyedProcessFunction):  # type: ignore[misc]
         """Dedup by event_id (LOCKED: 7d TTL) + route NaN/Inf session_load to DLQ.
 
