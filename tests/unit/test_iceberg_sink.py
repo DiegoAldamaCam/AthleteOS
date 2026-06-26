@@ -8,23 +8,29 @@ No Flink, no Docker, no network.
 Compatibility note (pyiceberg 0.7.1 + pyarrow 11.0.0 on Windows/Linux):
   - PyArrowFileIO.parse_location mishandles Windows drive-letter paths.
     _patch_pyarrow_file_io() fixes this so SqlCatalog works in tmp_path.
-  - project_table uses concat_tables(promote_options=...) which is pyarrow>=14.
-    _patch_project_table() backports to promote=True for pyarrow 11.
   - DayTransform on TimestamptzType requires pyarrow's tzdata C++ library
     (not present on stock Windows pyarrow 11). The Iceberg schema uses
     TimestampType (naive) which avoids the OS-level tzdata dependency entirely
     while still enabling the day() partition transform.
-Both patches are applied in conftest-scoped fixtures or at module import.
+
+Read-back strategy:
+  table.scan().to_arrow() calls pyiceberg's project_table which uses
+  pa.concat_tables(promote_options="permissive"), a pyarrow >= 14 API.
+  On pinned pyarrow 11 this raises TypeError. Instead, tests verify written
+  data by reading the Parquet files directly from the warehouse tmp_path via
+  pyarrow.parquet — no pyiceberg read path involved.
 """
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 # ---------------------------------------------------------------------------
-# Compatibility patches (applied before any pyiceberg import that triggers
+# Compatibility patch (applied before any pyiceberg import that triggers
 # the affected code paths).
 # ---------------------------------------------------------------------------
 
@@ -36,6 +42,10 @@ def _patch_pyarrow_file_io() -> None:
     PyArrowFileIO's fs_by_scheme() rejects with "Unrecognized filesystem type".
     This patch normalises such paths so PyArrowFileIO hands them to the local
     filesystem correctly.  On Linux the original function is used as-is.
+
+    This shim is still needed because SqlCatalog uses PyArrowFileIO when
+    creating/registering the Iceberg table on Windows — even though read-back
+    now goes through pyarrow.parquet directly.
     """
     if sys.platform != "win32":
         return
@@ -58,41 +68,10 @@ def _patch_pyarrow_file_io() -> None:
     PyArrowFileIO.parse_location = staticmethod(_patched)
 
 
-def _patch_project_table() -> None:
-    """Backport project_table for pyarrow 11 compatibility.
-
-    pyiceberg 0.7.1 calls pa.concat_tables(tables, promote_options="permissive")
-    which was added in pyarrow 14.  We replace it with promote=True (pyarrow 11
-    API) when the installed pyarrow is older than 14.
-    """
-    if tuple(int(x) for x in pa.__version__.split(".")[:2]) >= (14, 0):
-        return  # nothing to do
-
-    import types
-    import pyiceberg.io.pyarrow as _pio
-
-    _orig_project = _pio.project_table
-
-    def _compat_project_table(*args, **kwargs):
-        import pyarrow as _pa
-        _orig_concat = _pa.concat_tables
-
-        def _compat_concat(tables, **kw):
-            kw.pop("promote_options", None)
-            return _orig_concat(tables, promote=True)
-
-        _pa.concat_tables = _compat_concat
-        try:
-            return _orig_project(*args, **kwargs)
-        finally:
-            _pa.concat_tables = _orig_concat
-
-    _pio.project_table = _compat_project_table
-
-
-# Apply patches once at module import (before any catalog/table is created).
+# Apply the Windows filesystem-path shim once at module import.
+# This fixes PyArrowFileIO on Windows so SqlCatalog can create tables in
+# tmp_path. It is a no-op on Linux/CI (guarded by sys.platform != "win32").
 _patch_pyarrow_file_io()
-_patch_project_table()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -116,6 +95,26 @@ def _make_catalog(tmp_path) -> SqlCatalog:
             "warehouse": str(tmp_path),
         },
     )
+
+
+def _read_all_parquet(tmp_path: Path) -> pa.Table:
+    """Read all Parquet files written by the sink under tmp_path.
+
+    The Iceberg warehouse lays out data files under
+    <warehouse>/<namespace>/<table>/data/**/*.parquet.
+    We glob for every .parquet file to avoid coupling to pyiceberg's internal
+    read path (which uses pa.concat_tables(promote_options=...) — a pyarrow
+    >= 14 API not available on pinned pyarrow 11).
+    """
+    files = sorted(tmp_path.rglob("*.parquet"))
+    if not files:
+        return pa.table({})
+    tables = [pq.read_table(str(f)) for f in files]
+    # cast to a common schema before concatenating; all files share the same
+    # Iceberg schema so only minor type promotions (if any) are needed.
+    target_schema = tables[0].schema
+    unified = [t.cast(target_schema) for t in tables]
+    return pa.concat_tables(unified)
 
 
 # Epoch-ms timestamps for 2024-01-01 and 2024-01-02 (UTC day starts)
@@ -211,27 +210,27 @@ class TestCreateTrainingEventTable:
 
 
 class TestAppendEvents:
-    """append_events writes a batch; scan returns exactly those rows."""
+    """append_events writes a batch; direct Parquet read returns exactly those rows."""
 
     def test_append_single_batch_returns_correct_row_count(self, tmp_path):
-        """Appending N records → scan returns N rows."""
+        """Appending N records → Parquet files on disk contain N rows total."""
         catalog = _make_catalog(tmp_path)
         table = create_training_event_table(catalog)
 
         events = [_EVENT_A1, _EVENT_A2, _EVENT_B1]
         append_events(table, events)
 
-        result = table.scan().to_arrow()
+        result = _read_all_parquet(tmp_path)
         assert len(result) == 3
 
     def test_append_preserves_field_values(self, tmp_path):
-        """Appended rows must have the correct field values."""
+        """Appended rows must have the correct field values in the Parquet files."""
         catalog = _make_catalog(tmp_path)
         table = create_training_event_table(catalog)
 
         append_events(table, [_EVENT_A1])
 
-        result = table.scan().to_arrow()
+        result = _read_all_parquet(tmp_path)
         assert result["event_id"].to_pylist() == ["evt-a1"]
         assert result["athlete_id"].to_pylist() == ["athlete_a"]
         assert result["event_type"].to_pylist() == ["strength"]
@@ -243,15 +242,15 @@ class TestAppendEvents:
     # ---------------------------------------------------------------------------
 
     def test_append_is_additive(self, tmp_path):
-        """Two appends must be additive: 2 × N events → 2N rows in the table."""
+        """Two appends must be additive: 2 × N events → 2N rows across all Parquet files."""
         catalog = _make_catalog(tmp_path)
         table = create_training_event_table(catalog)
 
         events = [_EVENT_A1, _EVENT_A2, _EVENT_B1]
         append_events(table, events)
-        append_events(table, events)  # second append
+        append_events(table, events)  # second append produces additional Parquet files
 
-        result = table.scan().to_arrow()
+        result = _read_all_parquet(tmp_path)
         assert len(result) == 6
 
 
@@ -325,14 +324,14 @@ class TestCompaction:
         if version_parts >= (0, 8):
             # On 0.8+, compact_table should succeed
             compact_table(table)
-            result = table.scan().to_arrow()
+            result = _read_all_parquet(tmp_path)
             assert len(result) == 2
         else:
             # On 0.7.x, compact_table must raise RuntimeError
             with pytest.raises(RuntimeError, match="pyiceberg >= 0.8"):
                 compact_table(table)
             # Data must still be readable after the failed compact
-            result = table.scan().to_arrow()
+            result = _read_all_parquet(tmp_path)
             assert len(result) == 2
 
     def test_expire_old_snapshots_raises_on_pyiceberg_lt_0_8(self, tmp_path):
@@ -354,12 +353,12 @@ class TestCompaction:
         if version_parts >= (0, 8):
             # On 0.8+, expire with older_than_ms=0 is a safe no-op
             expire_old_snapshots(table, older_than_ms=0)
-            result = table.scan().to_arrow()
+            result = _read_all_parquet(tmp_path)
             assert len(result) == 2
         else:
             # On 0.7.x, expire raises RuntimeError (no expire_snapshots API)
             with pytest.raises(RuntimeError, match="pyiceberg >= 0.8"):
                 expire_old_snapshots(table, older_than_ms=0)
             # Data must still be readable after the failed expire
-            result = table.scan().to_arrow()
+            result = _read_all_parquet(tmp_path)
             assert len(result) == 2
