@@ -921,7 +921,8 @@ CREATE TABLE canonical_training_event_source (
 
 
 def main() -> int:  # pragma: no cover - entrypoint
-    init_sentry()  # Sentry init at entrypoint (RESILIENCE F4); no-op if no DSN.
+    # NF-1: init_sentry() is called inside run() (covers all entry paths).
+    # A second call here would register a duplicate client; removed.
     # REQUIRED ENV VARS (WARNING W3 — insecure defaults):
     # KAFKA_BOOTSTRAP_SERVERS — must use SASL/SSL in production (not plaintext
     #   kafka:9092). Recommended: "broker:9092" with KAFKA_SECURITY_PROTOCOL=SSL
