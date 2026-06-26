@@ -225,6 +225,56 @@ def compute_deload_flags(acrs: Sequence[float | None]) -> list[int]:
     return flags
 
 
+# --- Rolling-window metrics computation (single source of truth, C8) ------
+# Extracted from RollingMetricsWindowFn.process() so the window math is:
+#   1. Unit-tested directly (no pyflink needed)
+#   2. Shared with any future operator that needs the same rolling formulas
+#   3. A single implementation — the function running in prod IS the tested one.
+#
+# The window function in main.py calls compute_rolling_metrics() instead of
+# reimplementing the 7/28/42 filter + SUM/AVG inline.
+
+
+def compute_rolling_metrics(
+    by_day: dict[int, float],
+    window_end: int,
+) -> tuple[float, float, float, "float | None"]:
+    """Compute acute_load, chronic_load_28d, chronic_load_42d, and ACR.
+
+    Args:
+        by_day: mapping of {day_start_ms: daily_load} for all days in the
+                42d sliding window (already deduped to keep the max daily_load
+                per day, absorbing ContinuousEventTimeTrigger multi-emit).
+        window_end: epoch-ms of the window's exclusive end (day-aligned).
+                    metric_date = window_end - MILLIS_PER_DAY.
+
+    Returns:
+        (acute_load, chronic_load_28d, chronic_load_42d, acr)
+        acr is None when chronic_load_28d == 0 (spec: NULL if chronic=0).
+
+    This is the CANONICAL formula implementation shared between the unit tests
+    and the Flink window operator. The unit tests (TestComputeRollingMetrics)
+    prove the formulas; the Flink operator calls this function so what is
+    tested IS what runs in production. (C8 single source of truth)
+    """
+    metric_date = window_end - MILLIS_PER_DAY  # last full day in the window
+
+    # Slice the day buckets for each window size.
+    acute_start = window_end - ACUTE_WINDOW_DAYS * MILLIS_PER_DAY
+    c28_start = window_end - CHRONIC_28D_WINDOW_DAYS * MILLIS_PER_DAY
+    c42_start = window_end - CHRONIC_42D_WINDOW_DAYS * MILLIS_PER_DAY
+
+    acute_days = [v for day, v in by_day.items() if acute_start <= day <= metric_date]
+    c28_days = [v for day, v in by_day.items() if c28_start <= day <= metric_date]
+    c42_days = [v for day, v in by_day.items() if c42_start <= day <= metric_date]
+
+    al = acute_load(acute_days)
+    cl28 = chronic_load(c28_days)
+    cl42 = chronic_load(c42_days)
+    acr = acute_chronic_ratio(al, cl28)
+    return al, cl28, cl42, acr
+
+
 # --- DLQ error envelope (spec "DLQ Error Envelope") -----------------------
 
 

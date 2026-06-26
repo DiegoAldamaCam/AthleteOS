@@ -308,8 +308,8 @@ def run(config: MetricsJobConfig) -> None:  # pragma: no cover - flink runtime
         LATE_DATA,
         MILLIS_PER_DAY,
         VALIDATION_FAILURE,
-        acute_chronic_ratio,
         build_metrics_dlq_envelope,
+        compute_rolling_metrics,
         epoch_ms_now,
         is_finite_load,
         update_deload_state,
@@ -614,7 +614,12 @@ CREATE TABLE canonical_training_event_source (
     # (max -> final) to absorb the daily window's ContinuousEventTimeTrigger
     # multi-emit. See the module docstring for the design refinement note.
     class RollingMetricsWindowFn(ProcessWindowFunction):  # type: ignore[misc]
-        """Compute acute/chronic_28d/chronic_42d/ACR from the 42d daily_loads."""
+        """Compute acute/chronic_28d/chronic_42d/ACR from the 42d daily_loads.
+
+        Delegates to compute_rolling_metrics() from jobs.metrics.compute — the
+        SAME unit-tested pure function. Single source of truth: the formula
+        running in production is the one the unit tests prove. (C8)
+        """
 
         def process(
             self,
@@ -633,24 +638,12 @@ CREATE TABLE canonical_training_event_source (
                 load = float(dl[IDX_DL_DAILY_LOAD])
                 if day not in by_day or load > by_day[day]:
                     by_day[day] = load
-            # acute_load = SUM of daily_load for the last 7 days [t-6, t].
-            acute = sum(
-                v for day, v in by_day.items()
-                if window_end - 7 * MILLIS_PER_DAY <= day <= metric_date
+            # Delegate to the pure compute_rolling_metrics() function (C8).
+            # This is the same function the unit tests exercise directly, so the
+            # formula running in the Flink window IS the tested implementation.
+            acute, chronic_28d, chronic_42d, acr_val = compute_rolling_metrics(
+                by_day, window_end
             )
-            # chronic_load_28d = AVG of daily_load for the last 28 days.
-            c28 = [
-                v for day, v in by_day.items()
-                if window_end - 28 * MILLIS_PER_DAY <= day <= metric_date
-            ]
-            chronic_28d = (sum(c28) / len(c28)) if c28 else 0.0
-            # chronic_load_42d = AVG of daily_load for the last 42 days.
-            c42 = [
-                v for day, v in by_day.items()
-                if window_end - 42 * MILLIS_PER_DAY <= day <= metric_date
-            ]
-            chronic_42d = (sum(c42) / len(c42)) if c42 else 0.0
-            acr_val = acute_chronic_ratio(acute, chronic_28d)  # None if chronic=0
             # ACR None (chronic==0) cannot cross a FLOAT Row field boundary
             # safely in PyFlink 1.19 — FLOAT TypeInfo is non-nullable at the
             # Java level. Encode None as float('nan') in the Row so the FLOAT

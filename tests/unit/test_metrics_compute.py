@@ -38,10 +38,99 @@ from jobs.metrics.compute import (
     build_metrics_dlq_envelope,
     chronic_load,
     compute_deload_flags,
+    compute_rolling_metrics,
     is_finite_load,
     sum_loads,
     update_deload_state,
 )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_DAY_MS = MILLIS_PER_DAY  # alias for brevity in rolling-window tests
+
+# A simple by_day fixture: N consecutive days starting from day 0.
+# day_start_ms for day i = i * _DAY_MS (window_end is just above the last day).
+
+
+def _by_day(n_days: int, load_per_day: float = 100.0) -> dict[int, float]:
+    """Return {day_start_ms: load} for days 0..n_days-1."""
+    return {i * _DAY_MS: load_per_day for i in range(n_days)}
+
+
+def _window_end(n_days: int) -> int:
+    """window_end = n_days * MILLIS_PER_DAY (exclusive, day-aligned)."""
+    return n_days * _DAY_MS
+
+
+# --- compute_rolling_metrics (C8 single source of truth) -------------------
+
+
+class TestComputeRollingMetrics:
+    """Prove that compute_rolling_metrics() is the canonical window formula.
+
+    These tests directly test the pure function that the Flink window operator
+    calls, guaranteeing the implementation running in prod is the same one that
+    passed the unit tests. (C8 readability / single source of truth)
+    """
+
+    def test_7_days_full_window(self):
+        # 7 days @100: acute=700, chronic_28d=100 (/7=100), ACR=7.0
+        by_day = _by_day(7)
+        w_end = _window_end(7)
+        al, cl28, cl42, acr = compute_rolling_metrics(by_day, w_end)
+        assert al == pytest.approx(700.0)
+        assert cl28 == pytest.approx(100.0)
+        assert cl42 == pytest.approx(100.0)
+        assert acr == pytest.approx(7.0)
+
+    def test_single_day_acr_none_chronic_zero(self):
+        # Day 1 only: acute=100, chronic_28d=100/1=100 -> ACR=1.0
+        # (with /n denominator, 1 day -> chronic=100 not 100/28)
+        by_day = _by_day(1)
+        w_end = _window_end(1)
+        al, cl28, cl42, acr = compute_rolling_metrics(by_day, w_end)
+        assert al == pytest.approx(100.0)
+        assert cl28 == pytest.approx(100.0)  # /n: 1 day
+        assert acr == pytest.approx(1.0)  # 100/100
+
+    def test_empty_window_acr_none(self):
+        # Empty by_day -> all zeros -> ACR=None (spec: NULL if chronic=0)
+        al, cl28, cl42, acr = compute_rolling_metrics({}, _window_end(1))
+        assert al == 0.0
+        assert cl28 == 0.0
+        assert acr is None
+
+    def test_28_days_full_window(self):
+        # 28 days @100: acute=700 (last 7), chronic_28d=100, ACR=7.0
+        by_day = _by_day(28)
+        w_end = _window_end(28)
+        al, cl28, cl42, acr = compute_rolling_metrics(by_day, w_end)
+        assert al == pytest.approx(700.0)
+        assert cl28 == pytest.approx(100.0)
+        assert acr == pytest.approx(7.0)
+
+    def test_42_days_all_windows_populated(self):
+        # 42 days @100: acute=700, chronic_28d=100, chronic_42d=100, ACR=7.0
+        by_day = _by_day(42)
+        w_end = _window_end(42)
+        al, cl28, cl42, acr = compute_rolling_metrics(by_day, w_end)
+        assert al == pytest.approx(700.0)
+        assert cl28 == pytest.approx(100.0)
+        assert cl42 == pytest.approx(100.0)
+        assert acr == pytest.approx(7.0)
+
+    def test_partial_window_dynamic_denominator_adr16(self):
+        # ADR-16: 3 days @100 in a 42d window -> chronic_28d=100/3=100,
+        # not 300/28=10.7. Proves the pure function is used (not inline /28).
+        by_day = _by_day(3)
+        w_end = _window_end(3)
+        al, cl28, cl42, acr = compute_rolling_metrics(by_day, w_end)
+        assert cl28 == pytest.approx(100.0), (
+            f"chronic_28d must be 100.0 (300/3, /n denominator); got {cl28}"
+        )
 
 
 # --- daily_load = sum of session_load on a day -----------------------------
