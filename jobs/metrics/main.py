@@ -102,11 +102,44 @@ WATERMARK_OUT_OF_ORDER_HOURS = 24
 ALLOWED_LATENESS_MS = 24 * 60 * 60 * 1000
 
 
+# Characters that must never appear in DDL-interpolated config values.
+# A single quote closes an SQL string literal; double quote, newline (LF/CR),
+# and null byte enable multi-line or parser-confusion injection into the
+# Flink Table DDL f-string (source_ddl). This is an allowlist-based guard:
+# if the value contains ANY of these characters it is unconditionally rejected
+# with a ValueError before it can reach tbl_env.execute_sql. (RISK F1)
+_DDL_FORBIDDEN_CHARS: str = "'\"\n\r\x00"
+
+
+def _validate_ddl_config_field(field_name: str, value: str) -> None:
+    """Reject values that contain SQL/DDL injection characters.
+
+    Raises ValueError with the field name so the caller can identify which
+    config parameter is problematic. Called in MetricsJobConfig.__init__ for
+    every field that is interpolated into source_ddl. (RISK F1)
+    """
+    for ch in _DDL_FORBIDDEN_CHARS:
+        if ch in value:
+            raise ValueError(
+                f"MetricsJobConfig.{field_name} contains a character that is "
+                f"forbidden in DDL interpolation (char ord={ord(ch):#04x}). "
+                f"Accepted characters: printable ASCII excluding '\"\\n\\r\\x00. "
+                f"Received value (first 80 chars): {value[:80]!r}"
+            )
+
+
 class MetricsJobConfig:
     """Plain configuration container (no pyflink). Import-safe.
 
     Allows tests / orchestrators to construct and inspect a config without
     pulling in pyflink; ``run()`` consumes it from inside the lazy-import scope.
+
+    Validation (RISK F1 — DDL injection guard): bootstrap_servers,
+    schema_registry_url, group_id, and canonical_topic are interpolated raw
+    into a Flink Table DDL f-string (tbl_env.execute_sql). Any value containing
+    a quote, newline, or null byte could inject arbitrary connector properties.
+    These four fields are validated at construction time; invalid values raise
+    ValueError immediately, before any DDL is executed.
     """
 
     def __init__(
@@ -126,6 +159,12 @@ class MetricsJobConfig:
         parallelism: int | None = None,
         no_restart: bool = False,
     ) -> None:
+        # Validate all fields that are interpolated into the DDL f-string.
+        # Must run BEFORE assignment so a bad value never reaches run(). (RISK F1)
+        _validate_ddl_config_field("bootstrap_servers", bootstrap_servers)
+        _validate_ddl_config_field("schema_registry_url", schema_registry_url)
+        _validate_ddl_config_field("group_id", group_id)
+        _validate_ddl_config_field("canonical_topic", canonical_topic)
         self.bootstrap_servers = bootstrap_servers
         self.schema_registry_url = schema_registry_url
         self.group_id = group_id
