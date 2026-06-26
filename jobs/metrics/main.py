@@ -144,6 +144,62 @@ import os
 import sys
 from typing import Any
 
+# ---------------------------------------------------------------------------
+# Observability: Flink metric counter names (RESILIENCE F4)
+# ---------------------------------------------------------------------------
+# These are exported at module level (pyflink-free) so tests can import and
+# verify them without a Flink runtime. The run() function wires them into the
+# Flink RuntimeContext metric group when the job starts.
+#
+# Alerting intent (design note):
+#   - COUNTER_DLQ_NAN > 0: upstream producer emitting non-finite session_load;
+#     alert on any non-zero rate (sensor/pipeline bug).
+#   - COUNTER_DLQ_LATE_DAILY / COUNTER_DLQ_LATE_ROLLING > 0 (sustained):
+#     watermark lag or out-of-orderness exceeding 24h (investigate ingestion).
+#   - COUNTER_DLQ_DEDUP_DROPS (high): possible replay flood; alert if > 5%
+#     of COUNTER_RECORDS_PROCESSED.
+#   - Checkpoint failure threshold: >0 failures in a 5-minute window should
+#     trigger a PagerDuty/Sentry alert (configure in Flink metrics reporter).
+#   - Error-rate threshold: >0 uncaught job exceptions per minute -> Sentry
+#     event + alert (Sentry issue triggers on first occurrence + daily digest).
+
+COUNTER_DLQ_NAN: str = "metrics.dlq.nan_guard"
+COUNTER_DLQ_LATE_DAILY: str = "metrics.dlq.late_daily"
+COUNTER_DLQ_LATE_ROLLING: str = "metrics.dlq.late_rolling"
+COUNTER_DLQ_DEDUP_DROPS: str = "metrics.dedup.drops"
+COUNTER_RECORDS_PROCESSED: str = "metrics.records.processed"
+
+
+def init_sentry() -> None:
+    """Initialize Sentry SDK if SENTRY_DSN is set. No-op otherwise. (RESILIENCE F4)
+
+    Guarded so that:
+    - Unit tests (no SENTRY_DSN) never fail.
+    - Environments without sentry-sdk installed do not fail.
+    - A bad DSN does not crash the job (Sentry failures are silenced).
+
+    Call this at the start of run() / main() before any job logic. Sentry then
+    captures uncaught exceptions at the job level (crash-loop signal).
+    """
+    dsn = os.environ.get("SENTRY_DSN", "").strip()
+    if not dsn:
+        return
+    try:
+        import sentry_sdk  # lazy import; not available in all envs
+
+        sentry_sdk.init(
+            dsn=dsn,
+            # Flink jobs are long-running processes; sample all exceptions but
+            # do not trace individual events (performance impact would be too high).
+            traces_sample_rate=0.0,
+            # Sentry internal errors must never surface as job exceptions.
+            # with_locals captures stack frames; enable in non-prod only.
+            with_locals=os.environ.get("SENTRY_WITH_LOCALS", "false").lower() == "true",
+        )
+    except Exception:  # noqa: BLE001
+        # Sentry init must NEVER crash the job. Silently continue.
+        pass
+
 # Constants are import-safe (no pyflink); they describe the topology.
 CANONICAL_TOPIC = "canonical.training_event"
 DLQ_TOPIC = "dlq.canonical.training_event"
@@ -265,6 +321,10 @@ def run(config: MetricsJobConfig) -> None:  # pragma: no cover - flink runtime
     on interpreters without apache-flink. Executed only on a flink-capable
     runtime (apache-flink 1.19 on CPython 3.8-3.11).
     """
+    # Initialize Sentry before any job logic (captures exceptions if SENTRY_DSN
+    # is set; no-op when absent). (RESILIENCE F4)
+    init_sentry()
+
     # --- pyflink imports (deferred) -----------------------------------------
     from pyflink.common import (
         Duration,
@@ -290,6 +350,7 @@ def run(config: MetricsJobConfig) -> None:  # pragma: no cover - flink runtime
     from pyflink.datastream.functions import (
         AggregateFunction,
         KeyedProcessFunction,
+        MapFunction,
         ProcessWindowFunction,
     )
     from pyflink.datastream.state import StateTtlConfig, ValueStateDescriptor
@@ -531,14 +592,22 @@ CREATE TABLE canonical_training_event_source (
                 ValueStateDescriptor("seen-event-id", Types.BOOLEAN())
             )
             self._seen.enable_time_to_live(ttl)
+            # Flink metric counters (RESILIENCE F4). Registered once per
+            # TaskManager slot; Flink aggregates across parallelism.
+            mg = runtime_context.get_metrics_group()
+            self._cnt_processed = mg.counter(COUNTER_RECORDS_PROCESSED)
+            self._cnt_nan = mg.counter(COUNTER_DLQ_NAN)
+            self._cnt_dedup = mg.counter(COUNTER_DLQ_DEDUP_DROPS)
 
         def process_element(self, value: Any, ctx: Any) -> None:
             if bool(self._seen.value()):
+                self._cnt_dedup.inc()
                 return  # duplicate inside the 7d re-delivery window -> dropped
             session_load = value[IDX_SESSION_LOAD]
             if not is_finite_load(session_load):
                 # NaN/Inf guard (task 5.4): route to DLQ, mark seen, drop.
                 self._seen.update(True)
+                self._cnt_nan.inc()
                 # Truncate the session_load value in the error message to avoid
                 # embedding unbounded repr() strings in DLQ payloads. (WARNING)
                 sl_repr = repr(session_load)
@@ -558,6 +627,7 @@ CREATE TABLE canonical_training_event_source (
                 )
                 return
             self._seen.update(True)
+            self._cnt_processed.inc()
             yield value  # unchanged; record timestamp preserved
 
     deduped = (
@@ -774,39 +844,57 @@ CREATE TABLE canonical_training_event_source (
     # (JSON, AT_LEAST_ONCE per design ADR-12).
     nan_dlq = deduped.get_side_output(dlq_nan_tag)  # DataStream[STRING]
 
-    def _late_canonical_to_json(row: Any) -> str:
-        return json.dumps(
-            build_metrics_dlq_envelope(
-                original_key=row[IDX_ATHLETE_ID],
-                original_value=json.dumps(
-                    {"event_id": row[IDX_EVENT_ID], "event_time": row[IDX_EVENT_TIME]}
-                ),
-                error_type=LATE_DATA,
-                error_message="event arrived past daily window-end + 24h allowed lateness",
-                timestamp=epoch_ms_now(),
-            )
-        )
+    class _LateDailyMapFn(MapFunction):  # type: ignore[misc]
+        """Map late canonical Row -> DLQ JSON string + increment metric counter."""
 
-    def _late_dailyload_to_json(row: Any) -> str:
-        return json.dumps(
-            build_metrics_dlq_envelope(
-                original_key=row[IDX_DL_ATHLETE_ID],
-                original_value=json.dumps(
-                    {"day_start": row[IDX_DL_DAY_START], "daily_load": row[IDX_DL_DAILY_LOAD]}
-                ),
-                error_type=LATE_DATA,
-                error_message="daily_load arrived past rolling window-end + 24h allowed lateness",
-                timestamp=epoch_ms_now(),
+        def open(self, runtime_context: Any) -> None:
+            self._cnt = runtime_context.get_metrics_group().counter(
+                COUNTER_DLQ_LATE_DAILY
             )
-        )
+
+        def map(self, row: Any) -> str:
+            self._cnt.inc()
+            return json.dumps(
+                build_metrics_dlq_envelope(
+                    original_key=row[IDX_ATHLETE_ID],
+                    original_value=json.dumps(
+                        {"event_id": row[IDX_EVENT_ID], "event_time": row[IDX_EVENT_TIME]}
+                    ),
+                    error_type=LATE_DATA,
+                    error_message="event arrived past daily window-end + 24h allowed lateness",
+                    timestamp=epoch_ms_now(),
+                )
+            )
+
+    class _LateRollingMapFn(MapFunction):  # type: ignore[misc]
+        """Map late daily_load Row -> DLQ JSON string + increment metric counter."""
+
+        def open(self, runtime_context: Any) -> None:
+            self._cnt = runtime_context.get_metrics_group().counter(
+                COUNTER_DLQ_LATE_ROLLING
+            )
+
+        def map(self, row: Any) -> str:
+            self._cnt.inc()
+            return json.dumps(
+                build_metrics_dlq_envelope(
+                    original_key=row[IDX_DL_ATHLETE_ID],
+                    original_value=json.dumps(
+                        {"day_start": row[IDX_DL_DAY_START], "daily_load": row[IDX_DL_DAILY_LOAD]}
+                    ),
+                    error_type=LATE_DATA,
+                    error_message="daily_load arrived past rolling window-end + 24h allowed lateness",
+                    timestamp=epoch_ms_now(),
+                )
+            )
 
     late_daily_json = (
         daily_stream.get_side_output(late_daily_tag)
-        .map(_late_canonical_to_json, output_type=Types.STRING())
+        .map(_LateDailyMapFn(), output_type=Types.STRING())
     )
     late_rolling_json = (
         acr_stream.get_side_output(late_rolling_tag)
-        .map(_late_dailyload_to_json, output_type=Types.STRING())
+        .map(_LateRollingMapFn(), output_type=Types.STRING())
     )
 
     dlq_combined = nan_dlq.union(late_daily_json).union(late_rolling_json)
@@ -831,6 +919,7 @@ CREATE TABLE canonical_training_event_source (
 
 
 def main() -> int:  # pragma: no cover - entrypoint
+    init_sentry()  # Sentry init at entrypoint (RESILIENCE F4); no-op if no DSN.
     # REQUIRED ENV VARS (WARNING W3 — insecure defaults):
     # KAFKA_BOOTSTRAP_SERVERS — must use SASL/SSL in production (not plaintext
     #   kafka:9092). Recommended: "broker:9092" with KAFKA_SECURITY_PROTOCOL=SSL

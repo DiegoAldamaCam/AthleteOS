@@ -28,6 +28,7 @@ dependencies = [
   "fastapi>=0.110",
   "uvicorn[standard]>=0.29",
   "streamlit>=1.33",
+  "sentry-sdk>=2.0",
 ]
 
 [project.optional-dependencies]
