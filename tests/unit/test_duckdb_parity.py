@@ -315,3 +315,106 @@ class TestCheckParity:
         """Both sides empty → trivially in parity (no keys to compare)."""
         mismatches = check_parity([], [])
         assert mismatches == []
+
+
+# ---------------------------------------------------------------------------
+# Task C: snapshot-path coverage (work-unit 6.3 gap — not covered in original)
+# ---------------------------------------------------------------------------
+
+
+class TestReadTrainingEventsSnapshotPath:
+    """read_training_events with table= uses _parquet_files_from_snapshot, NOT glob.
+
+    These tests exist specifically to exercise the snapshot-based Parquet
+    enumeration path so the production code path used in 6.4 has coverage.
+
+    Key invariant: passing a pyiceberg Table object routes through
+    _parquet_files_from_snapshot(table), which walks the current snapshot's
+    manifests to retrieve exactly the live data files — NOT a filesystem glob.
+    """
+
+    def test_snapshot_path_single_append_returns_correct_row_count(self, tmp_path):
+        """Via table= (snapshot path): one append of N events → N rows returned."""
+        catalog = _make_catalog(tmp_path)
+        table = create_training_event_table(catalog)
+
+        events = [
+            _make_event("snap-1", "athlete_a", _TS_2024_01_01, session_load=100.0),
+            _make_event("snap-2", "athlete_b", _TS_2024_01_02, session_load=150.0),
+            _make_event("snap-3", "athlete_a", _TS_2024_01_02, session_load=200.0),
+        ]
+        append_events(table, events)
+
+        # Pass the Table object — this forces _parquet_files_from_snapshot
+        rows = read_training_events(str(tmp_path), table=table)
+        assert len(rows) == 3
+
+    def test_snapshot_path_returns_correct_field_values(self, tmp_path):
+        """Via table=: returned rows contain the original field values (not corrupted by path normalisation)."""
+        catalog = _make_catalog(tmp_path)
+        table = create_training_event_table(catalog)
+
+        evt = _make_event("snap-x", "athlete_snap", _TS_2024_01_01, session_load=77.5)
+        append_events(table, [evt])
+
+        rows = read_training_events(str(tmp_path), table=table)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["event_id"] == "snap-x"
+        assert row["athlete_id"] == "athlete_snap"
+        # session_load is float32 in Parquet; allow small tolerance
+        assert abs(float(row["session_load"]) - 77.5) < 0.1
+
+    def test_snapshot_path_is_additive_across_two_appends(self, tmp_path):
+        """Via table=: two appends of N events each → snapshot path sees 2N rows.
+
+        This verifies the snapshot manifest walk accumulates entries from both
+        append operations (each append creates a new snapshot that extends the
+        previous one by including all prior manifest files).
+        """
+        catalog = _make_catalog(tmp_path)
+        table = create_training_event_table(catalog)
+
+        batch1 = [
+            _make_event("b1-evt1", "athlete_a", _TS_2024_01_01),
+            _make_event("b1-evt2", "athlete_b", _TS_2024_01_01),
+        ]
+        batch2 = [
+            _make_event("b2-evt1", "athlete_a", _TS_2024_01_02),
+            _make_event("b2-evt2", "athlete_b", _TS_2024_01_02),
+        ]
+        append_events(table, batch1)
+        append_events(table, batch2)
+
+        # Snapshot path should see all 4 rows from both batches
+        rows = read_training_events(str(tmp_path), table=table)
+        assert len(rows) == 4
+
+    def test_snapshot_path_vs_glob_path_return_same_rows(self, tmp_path):
+        """Snapshot path and glob path must agree on row set for a fresh warehouse.
+
+        This is the cross-strategy consistency check: for a simple warehouse
+        with no deletions or compactions, both enumeration paths must produce
+        identical results.  If _parquet_files_from_snapshot returns different
+        paths than the glob (e.g. due to file:// prefix or Windows backslash
+        bugs), the row counts will diverge and this test will catch it.
+        """
+        catalog = _make_catalog(tmp_path)
+        table = create_training_event_table(catalog)
+
+        events = [
+            _make_event("cmp-1", "athlete_a", _TS_2024_01_01, session_load=100.0),
+            _make_event("cmp-2", "athlete_a", _TS_2024_01_02, session_load=200.0),
+        ]
+        append_events(table, events)
+
+        rows_glob = read_training_events(str(tmp_path))            # glob path
+        rows_snap = read_training_events(str(tmp_path), table=table)  # snapshot path
+
+        # Both paths must agree on row count
+        assert len(rows_glob) == len(rows_snap) == 2
+
+        # Both paths must return the same event_id set (order may differ)
+        glob_ids = {r["event_id"] for r in rows_glob}
+        snap_ids = {r["event_id"] for r in rows_snap}
+        assert glob_ids == snap_ids == {"cmp-1", "cmp-2"}
