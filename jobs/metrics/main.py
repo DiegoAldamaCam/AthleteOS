@@ -387,21 +387,36 @@ def run(config: MetricsJobConfig) -> None:  # pragma: no cover - flink runtime
 
         env.set_restart_strategy(RestartStrategies.no_restart())
 
-    # Bounded mode (integration test): set Python bundle size to 1 so the Flink
-    # runtime processes one element at a time through each Python operator.
-    # Without this, PyFlink batches all elements into a single bundle before
-    # processing them, so intermediate watermarks (emitted by
-    # for_monotonous_timestamps() after each element) do not reach the window
-    # operator until the entire bundle is complete. With bundle size = 1, each
-    # element is flushed individually, watermarks advance between elements, and
-    # the tumbling window correctly detects the late event (evt-day-1-late) as
-    # past its allowed lateness -> routes it to side_output_late_data (DLQ).
-    # Production stays at the Flink default (100 000 elements per bundle) and is
-    # not affected by this gate (config.bounded is False there). (C4 fix)
+    # Bounded mode (integration test): two settings work together to make the
+    # periodic watermark timer fire between every element, ensuring the watermark
+    # reflects the latest event_time before the next element is delivered to the
+    # window operator:
+    #
+    #   1. bundle.size=1 / bundle.time=1ms: forces the PyFlink runtime to flush
+    #      each Python bundle after a single element (or after 1ms), so the Java
+    #      layer sees each event individually rather than as a batch.
+    #
+    #   2. auto-watermark-interval=1ms: the periodic watermark timer fires every
+    #      1ms of wall-clock time (default: 200ms). Because each bundle flush in
+    #      the minicluster takes well over 1ms (Python GIL, Avro, network), the
+    #      timer is guaranteed to fire and emit the updated watermark between
+    #      consecutive events. This makes for_monotonous_timestamps() behave
+    #      effectively per-element in bounded/test mode.
+    #
+    # Together these ensure that when evt-day-1-late (offset 13) reaches the
+    # TumblingEventTimeWindow, the watermark has already advanced past day-1's
+    # window_end + allowed_lateness boundary, so Flink correctly routes it to
+    # side_output_late_data (DLQ) deterministically.
+    #
+    # Production stays at Flink defaults (bundle.size=100000, interval=200ms)
+    # and is not affected (config.bounded is False there). (C4 watermark fix)
     if config.bounded:
         _j_cfg = env._j_stream_execution_environment.getConfiguration()
         _j_cfg.setString("python.fn-execution.bundle.size", "1")
         _j_cfg.setString("python.fn-execution.bundle.time", "1")
+        # Drive the periodic watermark timer to effectively per-element frequency.
+        # set_auto_watermark_interval takes milliseconds as an integer.
+        env.get_config().set_auto_watermark_interval(1)
 
     # RocksDB state backend (task 5.1, production) + EXACTLY_ONCE checkpointing.
     # The state backend is gated by config.use_rocksdb (see MetricsJobConfig):
@@ -581,14 +596,18 @@ CREATE TABLE canonical_training_event_source (
                 pass
             return record_timestamp
 
-    # In bounded (test) mode, use for_monotonous_timestamps() so the watermark
-    # advances to (event_time - 1) after EVERY element (punctuated, no timer
-    # dependency). This guarantees that when the late event arrives at the
-    # tumbling window, the watermark has already passed the window_end +
-    # allowed_lateness boundary, causing Flink to correctly route it to
-    # side_output_late_data (DLQ). In unbounded (production) mode, the 24h
-    # for_bounded_out_of_orderness watermark is used so genuinely out-of-order
-    # events are not dropped prematurely. (C4 watermark determinism fix)
+    # In bounded (test) mode, use for_monotonous_timestamps() as the watermark
+    # strategy. Note: for_monotonous_timestamps() is PERIODIC (not punctuated) --
+    # it extends BoundedOutOfOrdernessWatermarks and updates maxTimestamp in
+    # onEvent() but only EMITS the watermark in onPeriodicEmit(), governed by
+    # the auto-watermark-interval (set to 1ms above for bounded mode). This
+    # means determinism requires the periodic timer to fire between the last
+    # in-order event and the late event -- guaranteed when the interval is 1ms
+    # and each bundle flush takes >> 1ms (see bundle settings above).
+    #
+    # In unbounded (production) mode, the 24h for_bounded_out_of_orderness
+    # watermark is used so genuinely out-of-order events are not dropped
+    # prematurely. (C4 watermark determinism fix)
     if config.bounded:
         watermark = WatermarkStrategy.for_monotonous_timestamps().with_timestamp_assigner(
             _EventTimeAssigner()
