@@ -387,6 +387,22 @@ def run(config: MetricsJobConfig) -> None:  # pragma: no cover - flink runtime
 
         env.set_restart_strategy(RestartStrategies.no_restart())
 
+    # Bounded mode (integration test): set Python bundle size to 1 so the Flink
+    # runtime processes one element at a time through each Python operator.
+    # Without this, PyFlink batches all elements into a single bundle before
+    # processing them, so intermediate watermarks (emitted by
+    # for_monotonous_timestamps() after each element) do not reach the window
+    # operator until the entire bundle is complete. With bundle size = 1, each
+    # element is flushed individually, watermarks advance between elements, and
+    # the tumbling window correctly detects the late event (evt-day-1-late) as
+    # past its allowed lateness -> routes it to side_output_late_data (DLQ).
+    # Production stays at the Flink default (100 000 elements per bundle) and is
+    # not affected by this gate (config.bounded is False there). (C4 fix)
+    if config.bounded:
+        _j_cfg = env._j_stream_execution_environment.getConfiguration()
+        _j_cfg.setString("python.fn-execution.bundle.size", "1")
+        _j_cfg.setString("python.fn-execution.bundle.time", "1")
+
     # RocksDB state backend (task 5.1, production) + EXACTLY_ONCE checkpointing.
     # The state backend is gated by config.use_rocksdb (see MetricsJobConfig):
     # the bounded integration test uses the default in-memory backend because
@@ -565,11 +581,24 @@ CREATE TABLE canonical_training_event_source (
                 pass
             return record_timestamp
 
-    watermark = (
-        WatermarkStrategy.for_bounded_out_of_orderness(
-            Duration.of_hours(WATERMARK_OUT_OF_ORDER_HOURS)
-        ).with_timestamp_assigner(_EventTimeAssigner())
-    )
+    # In bounded (test) mode, use for_monotonous_timestamps() so the watermark
+    # advances to (event_time - 1) after EVERY element (punctuated, no timer
+    # dependency). This guarantees that when the late event arrives at the
+    # tumbling window, the watermark has already passed the window_end +
+    # allowed_lateness boundary, causing Flink to correctly route it to
+    # side_output_late_data (DLQ). In unbounded (production) mode, the 24h
+    # for_bounded_out_of_orderness watermark is used so genuinely out-of-order
+    # events are not dropped prematurely. (C4 watermark determinism fix)
+    if config.bounded:
+        watermark = WatermarkStrategy.for_monotonous_timestamps().with_timestamp_assigner(
+            _EventTimeAssigner()
+        )
+    else:
+        watermark = (
+            WatermarkStrategy.for_bounded_out_of_orderness(
+                Duration.of_hours(WATERMARK_OUT_OF_ORDER_HOURS)
+            ).with_timestamp_assigner(_EventTimeAssigner())
+        )
     watermarked = canonical_stream.assign_timestamps_and_watermarks(watermark)
 
     # --- dedup (ValueState<bool> per event_id, 7d TTL) + NaN guard ----------
@@ -590,7 +619,7 @@ CREATE TABLE canonical_training_event_source (
                 .build()
             )
             self._seen = runtime_context.get_state(
-                ValueStateDescriptor("seen-event-id", Types.BOOLEAN())
+                ValueStateDescriptor("seen-event-id", Types.INT())
             )
             self._seen.enable_time_to_live(ttl)
             # Flink metric counters (RESILIENCE F4). Registered once per
@@ -601,13 +630,13 @@ CREATE TABLE canonical_training_event_source (
             self._cnt_dedup = mg.counter(COUNTER_DLQ_DEDUP_DROPS)
 
         def process_element(self, value: Any, ctx: Any) -> None:
-            if bool(self._seen.value()):
+            if self._seen.value() is not None:
                 self._cnt_dedup.inc()
                 return  # duplicate inside the 7d re-delivery window -> dropped
             session_load = value[IDX_SESSION_LOAD]
             if not is_finite_load(session_load):
                 # NaN/Inf guard (task 5.4): route to DLQ, mark seen, drop.
-                self._seen.update(True)
+                self._seen.update(1)
                 self._cnt_nan.inc()
                 # Truncate the session_load value in the error message to avoid
                 # embedding unbounded repr() strings in DLQ payloads. (WARNING)
@@ -627,7 +656,7 @@ CREATE TABLE canonical_training_event_source (
                     )
                 )
                 return
-            self._seen.update(True)
+            self._seen.update(1)
             self._cnt_processed.inc()
             yield value  # unchanged; record timestamp preserved
 
