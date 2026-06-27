@@ -13,6 +13,11 @@ ADR-16: WellnessEvent.avsc event_type ENUM → STRING
   routed to the DLQ as VALIDATION_FAILURE via select_dlq_error_type, mirroring
   the ADR-15 pattern in jobs/canonicalize/transform.py.
 
+  NOTE: This ADR-16 belongs to the athleteos-wellness-source design namespace
+  (Engram obs #133, topic sdd/athleteos-wellness-source/design). Each SDD
+  change maintains its own ADR numbering scope; the wellness ADR-16 is not
+  in conflict with any ADR-16 in other change namespaces.
+
 Reuses from jobs.canonicalize.transform (imported directly):
   - ValidationError, TransformError
   - parse_iso_to_epoch_ms, select_dlq_error_type

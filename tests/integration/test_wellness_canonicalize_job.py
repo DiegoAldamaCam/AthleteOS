@@ -203,15 +203,15 @@ def _consume_available(bootstrap_servers: str, topic: str, timeout: float) -> li
     })
     consumer.subscribe([topic])
     messages = []
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     quiet_since = None
     try:
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             msg = consumer.poll(1.0)
             if msg is None:
                 if messages:
-                    quiet_since = quiet_since or time.time()
-                    if time.time() - quiet_since > 4.0:
+                    quiet_since = quiet_since or time.monotonic()
+                    if time.monotonic() - quiet_since > 4.0:
                         break
                 continue
             if msg.error():
@@ -354,19 +354,26 @@ def test_wellness_canonicalize_job_dlq_and_dedup(redpanda_endpoints):
     assert _normalize_ms(canonical_record["event_time"]) == _EVENT_TIME_MS
     assert canonical_record["hrv"] == pytest.approx(65.0)
 
-    # Dedup proof: only the first event_id reached canonical
-    canonical_ids = [canonical_record["event_id"]]
-    assert canonical_ids == [_VALID_EVENT_ID], (
-        "duplicate event_id must be silently dropped by ValueState dedup"
+    # Dedup proof (FIX 4 — R3-C3): the test produced a valid record AND a
+    # duplicate with the same event_id. Exactly one canonical message must have
+    # come through (proving the duplicate was dropped). The count assertion at
+    # line 341 already enforces len == 1; this assertion names the surviving
+    # event_id explicitly so a regression (two records out) produces a clear
+    # message instead of a silent pass.
+    assert canonical_record["event_id"] == _VALID_EVENT_ID, (
+        "duplicate event_id must be silently dropped by ValueState dedup; "
+        "the surviving canonical record must carry the valid event_id"
     )
 
     # --- W2-5: invalid record (missing athlete_id) → DLQ --------------------
     dlq_msgs = _consume_available(
         bootstrap_servers, dlq_topic, _CONSUME_TIMEOUT_S
     )
-    assert len(dlq_msgs) >= 1, (
-        f"expected the invalid record (missing athlete_id) to be routed to DLQ, "
-        f"got {len(dlq_msgs)} messages"
+    # FIX 2 (R3-C1): exactly one DLQ message — the invalid record only.
+    # The valid record and its duplicate must NOT appear in the DLQ.
+    assert len(dlq_msgs) == 1, (
+        f"expected EXACTLY ONE DLQ record (the invalid missing-athlete_id record "
+        f"only; valid + duplicate must not appear in DLQ), got {len(dlq_msgs)}"
     )
     dlq_record = json.loads(dlq_msgs[0].value().decode("utf-8"))
 
@@ -375,6 +382,14 @@ def test_wellness_canonicalize_job_dlq_and_dedup(redpanda_endpoints):
         f"missing athlete_id → VALIDATION_FAILURE, got {dlq_record.get('error_type')!r}"
     )
     assert dlq_record["error_message"], "DLQ envelope must carry an error_message"
+    # FIX 3 (R3-C2): original_key for a record missing athlete_id.
+    # In process_element, athlete_id = raw.get("athlete_id") → None when the
+    # field is absent. build_dlq_envelope stores it as-is, so original_key is
+    # None in the envelope JSON.
+    assert dlq_record["original_key"] is None, (
+        f"DLQ envelope original_key must be None when athlete_id is missing, "
+        f"got {dlq_record.get('original_key')!r}"
+    )
     # W2-5: original_value is base64-encoded bytes of the raw JSON envelope
     decoded_original = base64.b64decode(dlq_record["original_value"]).decode("utf-8")
     assert json.loads(decoded_original)["event_id"] == _INVALID_EVENT_ID

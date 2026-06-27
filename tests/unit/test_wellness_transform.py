@@ -316,3 +316,63 @@ def test_build_dlq_envelope_has_expected_shape():
     assert env["original_value"] == base64.b64encode(original_value).decode("ascii")
     assert env["error_type"] == "VALIDATION_FAILURE"
     assert env["timestamp"] == now_ms
+
+
+# ---------------------------------------------------------------------------
+# FIX 5 (R3-C4): NUTRITION_DAILY with populated nutrition fields pass-through
+# ---------------------------------------------------------------------------
+
+
+def test_transform_nutrition_daily_populates_nutrition_fields():
+    """FIX 5 (R3-C4): transform_wellness_to_canonical with event_type=NUTRITION_DAILY
+    and populated nutrition fields must pass those values THROUGH to the canonical
+    record (not zero/None). Inverse of W2-3 (which only tests nutrition→None for
+    WELLNESS_DAILY). Confirms the pipeline does NOT null-out nutrition data for
+    records that legitimately carry it."""
+    raw = _raw_wellness_envelope(
+        event_type="NUTRITION_DAILY",
+        # Populate all nutrition fields with known values
+        calories=2400,
+        protein_g=160.5,
+        carbs_g=280.0,
+        fat_g=75.3,
+        nutrition_adherence=0.87,
+        # Wellness fields are typically None for NUTRITION_DAILY
+        hrv=None,
+        sleep_hours=None,
+        perceived_recovery=None,
+    )
+    out = transform_wellness_to_canonical(raw, schema_version=1)
+
+    assert out["event_type"] == "NUTRITION_DAILY"
+    # Nutrition fields must be passed through as-is (not zeroed or nulled)
+    assert out["calories"] == 2400
+    assert out["protein_g"] == pytest.approx(160.5)
+    assert out["carbs_g"] == pytest.approx(280.0)
+    assert out["fat_g"] == pytest.approx(75.3)
+    assert out["nutrition_adherence"] == pytest.approx(0.87)
+    # validate must accept NUTRITION_DAILY
+    validate_wellness_event(out)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# FIX 6 (R3-W2): end-to-end BOGUS_TYPE through full transform+validate flow
+# ---------------------------------------------------------------------------
+
+
+def test_bogus_event_type_through_full_pipeline_raises_validation_error():
+    """FIX 6 (R3-W2): feed raw payload with event_type='BOGUS_TYPE' through the
+    FULL flow — transform_wellness_to_canonical(raw) then validate_wellness_event(result)
+    — and assert ValidationError is raised. Proves the pipeline as process_element
+    runs it, not just the guard in isolation. The transform succeeds (BOGUS_TYPE
+    is a non-empty string), but validate rejects the off-symbol value."""
+    raw = _raw_wellness_envelope(event_type="BOGUS_TYPE")
+    # Step 1: transform succeeds (BOGUS_TYPE is a valid non-empty string)
+    canonical = transform_wellness_to_canonical(raw, schema_version=1)
+    assert canonical["event_type"] == "BOGUS_TYPE"
+    # Step 2: validate rejects the off-symbol value → DLQ path
+    with pytest.raises(ValidationError) as exc_info:
+        validate_wellness_event(canonical)
+    assert "BOGUS_TYPE" in str(exc_info.value) or "event_type" in str(exc_info.value).lower()
+    # Confirm the DLQ error_type is VALIDATION_FAILURE (the routing used in process_element)
+    assert select_dlq_error_type(exc_info.value) == "VALIDATION_FAILURE"

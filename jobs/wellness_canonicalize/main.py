@@ -41,6 +41,13 @@ Flink 1.19 avro-confluent Table DDL has no Avro enum type. Declaring
 which matches the migrated WellnessEvent.avsc (enum→string per ADR-16). The
 former enum's semantic guarantee is enforced at the application layer by
 validate_wellness_event() in transform.py.
+
+This is the wellness-source ADR-16 (enum→string for WellnessEvent),
+recorded in the design document (Engram obs #133, topic
+sdd/athleteos-wellness-source/design). It is DISTINCT from any ADR-16 in
+other design contexts — each SDD change maintains its own ADR numbering
+namespace. The strength/training ADR-15 is the direct parallel; there is
+no conflict with any cross-change ADR in the athleteos-wellness-source design.
 """
 
 from __future__ import annotations
