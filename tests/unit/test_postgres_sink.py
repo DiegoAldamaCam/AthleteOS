@@ -378,5 +378,18 @@ class TestUpsertWithRetry:
 # ---------------------------------------------------------------------------
 
 
-class _FakeOperationalError(Exception):
-    """Simulates psycopg2.OperationalError without requiring psycopg2."""
+# Base the fake on the REAL psycopg2.OperationalError when psycopg2 is
+# installed (CI / runtime), so upsert_with_retry's
+# `isinstance(exc, psycopg2.OperationalError)` reconnect branch fires. Fall
+# back to Exception only where psycopg2 is absent (e.g. CPython 3.14 dev box),
+# matching the same fallback the production code uses.
+try:  # pragma: no cover - import guard
+    import psycopg2 as _psycopg2
+
+    _OPERATIONAL_ERROR_BASE: type = _psycopg2.OperationalError
+except ImportError:  # pragma: no cover - psycopg2 absent locally
+    _OPERATIONAL_ERROR_BASE = Exception
+
+
+class _FakeOperationalError(_OPERATIONAL_ERROR_BASE):  # type: ignore[misc,valid-type]
+    """Simulates psycopg2.OperationalError; subclasses the real class when present."""
