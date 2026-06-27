@@ -41,6 +41,8 @@ dependencies = [
   # UI/API deps keep a floor only; minor bumps here are low-risk for this slice.
   "fastapi>=0.110",
   "uvicorn[standard]>=0.29",
+  # pydantic-settings backs api/config.py Settings; required at import time at runtime.
+  "pydantic-settings>=2.0,<3",
   "sentry-sdk>=2.0,<3",
 ]
 
@@ -50,6 +52,9 @@ dev = [
   "pytest>=8.0",
   "testcontainers[kafka]>=4.7",
   "requests>=2.31",
+  # httpx backs starlette.testclient.TestClient used by the API integration tests.
+  # Without it the API test modules skip at import time, yielding a false-green CI run.
+  "httpx>=0.27",
 ]
 
 # Explicit package discovery. Without this, setuptools flat-layout autodiscovery

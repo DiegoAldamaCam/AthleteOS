@@ -16,7 +16,7 @@ Business rules (LOCKED):
 
 from __future__ import annotations
 
-from datetime import date, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -54,8 +54,13 @@ _SQL_METRICS_RANGE = """
 
 
 def _today_utc() -> date:
-    """Return the current date in UTC."""
-    return date.today()
+    """Return the current date in UTC.
+
+    Uses ``datetime.now(timezone.utc)`` rather than ``date.today()`` because the
+    latter resolves to the host's local timezone, which would shift the default
+    ``to`` boundary by a calendar day on any non-UTC server.
+    """
+    return datetime.now(timezone.utc).date()
 
 
 @router.get(
