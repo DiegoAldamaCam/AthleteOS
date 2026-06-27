@@ -44,6 +44,12 @@ export default function DashboardPage() {
             {latestRow.readiness_score !== null && (
               <p>Readiness score: {latestRow.readiness_score.toFixed(1)}</p>
             )}
+            <p>
+              Recovery score:{' '}
+              {latestRow.recovery_score != null
+                ? latestRow.recovery_score.toFixed(1)
+                : '--'}
+            </p>
             <CoachingFlagsPanel coaching_flags={latestRow.coaching_flags} />
           </div>
         )}

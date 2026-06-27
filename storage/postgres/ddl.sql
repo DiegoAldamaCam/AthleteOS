@@ -30,3 +30,12 @@ ALTER TABLE athlete_metrics
     ADD COLUMN IF NOT EXISTS fatigue_score   FLOAT NULL,
     ADD COLUMN IF NOT EXISTS readiness_score FLOAT NULL,
     ADD COLUMN IF NOT EXISTS coaching_flags  TEXT  NULL;
+
+-- wellness-source: recovery_score column (additive, idempotent) — W3-9
+ALTER TABLE athlete_metrics ADD COLUMN IF NOT EXISTS recovery_score FLOAT NULL;
+-- ADR-19: enable recovery-only partial-row INSERT (omitted load cols -> NULL = not computed).
+-- ALTER COLUMN ... DROP NOT NULL is idempotent: re-running on an already-nullable column succeeds.
+ALTER TABLE athlete_metrics ALTER COLUMN acute_load DROP NOT NULL;
+ALTER TABLE athlete_metrics ALTER COLUMN chronic_load_28d DROP NOT NULL;
+ALTER TABLE athlete_metrics ALTER COLUMN chronic_load_42d DROP NOT NULL;
+ALTER TABLE athlete_metrics ALTER COLUMN deload_flag DROP NOT NULL;

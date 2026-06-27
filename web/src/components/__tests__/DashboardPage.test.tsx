@@ -53,6 +53,7 @@ function makeMetricRows(count = 5): MetricRow[] {
     fatigue_score: null,
     readiness_score: null,
     coaching_flags: null,
+    recovery_score: null,
   }))
 }
 
@@ -191,6 +192,7 @@ describe('Scenario: sparse-gap — densified series preserves null gap', () => {
         fatigue_score: null,
         readiness_score: null,
         coaching_flags: null,
+        recovery_score: null,
       },
       {
         athlete_id: 'A1',
@@ -203,6 +205,7 @@ describe('Scenario: sparse-gap — densified series preserves null gap', () => {
         fatigue_score: null,
         readiness_score: null,
         coaching_flags: null,
+        recovery_score: null,
       },
     ]
 
@@ -306,6 +309,7 @@ describe('Scenario: metrics-v2 scores and coaching flags visible', () => {
         fatigue_score: 45.0,
         readiness_score: 72.3,
         coaching_flags: ['monitor'],
+        recovery_score: null,
       },
     ]
 
@@ -322,5 +326,69 @@ describe('Scenario: metrics-v2 scores and coaching flags visible', () => {
 
     // Monitor coaching badge rendered by CoachingFlagsPanel
     expect(screen.getByText('Monitor')).toBeInTheDocument()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W3-12: recovery_score null renders "--" without crash
+// ---------------------------------------------------------------------------
+
+describe('Scenario: W3-12 — recovery_score null renders "--"', () => {
+  it('displays "--" for recovery score when recovery_score is null', async () => {
+    const rows: MetricRow[] = [
+      {
+        athlete_id: 'A1',
+        metric_date: '2025-03-01',
+        acute_load: 100,
+        chronic_load_28d: 90,
+        chronic_load_42d: 85,
+        acute_chronic_ratio: 1.1,
+        deload_flag: 0 as 0 | 1,
+        fatigue_score: null,
+        readiness_score: null,
+        coaching_flags: null,
+        recovery_score: null,
+      },
+    ]
+
+    mockFetchMetrics.mockResolvedValue(rows)
+    mockFetchDlqDepth.mockResolvedValue(makeDlqOk())
+
+    renderDashboard(makeClient())
+
+    // Must render "--" for null recovery_score, no crash
+    await screen.findByText('Recovery score: --')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// W3-13: recovery_score 73.3 renders "73.3" (1 decimal)
+// ---------------------------------------------------------------------------
+
+describe('Scenario: W3-13 — recovery_score 73.3 renders "73.3"', () => {
+  it('displays numeric recovery score formatted to 1 decimal place', async () => {
+    const rows: MetricRow[] = [
+      {
+        athlete_id: 'A1',
+        metric_date: '2025-03-01',
+        acute_load: 100,
+        chronic_load_28d: 90,
+        chronic_load_42d: 85,
+        acute_chronic_ratio: 1.1,
+        deload_flag: 0 as 0 | 1,
+        fatigue_score: null,
+        readiness_score: null,
+        coaching_flags: null,
+        recovery_score: 73.3,
+      },
+    ]
+
+    mockFetchMetrics.mockResolvedValue(rows)
+    mockFetchDlqDepth.mockResolvedValue(makeDlqOk())
+
+    renderDashboard(makeClient())
+
+    // Must render "73.3" — exactly 1 decimal place
+    await screen.findByText('Recovery score: 73.3')
   })
 })
