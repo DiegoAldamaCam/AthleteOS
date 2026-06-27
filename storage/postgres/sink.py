@@ -50,20 +50,26 @@ from typing import Any, Callable
 _MILLIS_PER_SECOND: int = 1_000
 
 # UPSERT SQL template (parameterized with %s — psycopg2 style).
-# Parameter order matches _record_to_params().
+# Parameter order matches build_upsert() params tuple (10 fields, positions 0-9).
+# WARNING-1: column list, VALUES placeholders, and DO UPDATE SET MUST stay in
+# exact field-order agreement (athlete_id[0]..deload_flag[6]..coaching_flags[9]).
 _UPSERT_SQL: str = """
 INSERT INTO athlete_metrics
     (athlete_id, metric_date, acute_load, chronic_load_28d, chronic_load_42d,
-     acute_chronic_ratio, deload_flag)
+     acute_chronic_ratio, deload_flag,
+     fatigue_score, readiness_score, coaching_flags)
 VALUES
-    (%s, %s, %s, %s, %s, %s, %s)
+    (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (athlete_id, metric_date)
 DO UPDATE SET
     acute_load          = EXCLUDED.acute_load,
     chronic_load_28d    = EXCLUDED.chronic_load_28d,
     chronic_load_42d    = EXCLUDED.chronic_load_42d,
     acute_chronic_ratio = EXCLUDED.acute_chronic_ratio,
-    deload_flag         = EXCLUDED.deload_flag
+    deload_flag         = EXCLUDED.deload_flag,
+    fatigue_score       = EXCLUDED.fatigue_score,
+    readiness_score     = EXCLUDED.readiness_score,
+    coaching_flags      = EXCLUDED.coaching_flags
 """.strip()
 
 
@@ -126,15 +132,24 @@ def build_upsert(record: dict) -> tuple[str, tuple]:
             athlete_id (str), metric_date (int epoch-ms),
             acute_load (float), chronic_load_28d (float),
             chronic_load_42d (float), acute_chronic_ratio (float | None),
-            deload_flag (int).
+            deload_flag (int),
+            fatigue_score (float | nan | None),  — nan/None -> SQL NULL
+            readiness_score (float | nan | None), — nan/None -> SQL NULL
+            coaching_flags (str),                — JSON string, never None
 
     Returns:
         (sql, params) where sql is the UPSERT string and params is a tuple
-        of 7 bound values in the order matching the SQL placeholders.
-        acute_chronic_ratio None/nan -> params contains None (SQL NULL).
+        of 10 bound values in the order matching the SQL placeholders.
+        acute_chronic_ratio, fatigue_score, readiness_score None/nan -> None (SQL NULL).
+        coaching_flags is passed through as a JSON string; empty list -> "[]".
     """
     metric_date_val: datetime.date = epoch_ms_to_date(int(record["metric_date"]))
     acr: "float | None" = _sanitize_acr(record.get("acute_chronic_ratio"))
+    fatigue: "float | None" = _sanitize_acr(record.get("fatigue_score"))
+    readiness: "float | None" = _sanitize_acr(record.get("readiness_score"))
+    # coaching_flags is a JSON string from the Row (json.dumps in process_element);
+    # it is never None in normal flow — the Row always carries "[]" at minimum.
+    coaching_flags_val: str = str(record.get("coaching_flags") or "[]")
 
     params: tuple = (
         str(record["athlete_id"]),
@@ -144,6 +159,9 @@ def build_upsert(record: dict) -> tuple[str, tuple]:
         float(record["chronic_load_42d"]),
         acr,
         int(record["deload_flag"]),
+        fatigue,
+        readiness,
+        coaching_flags_val,
     )
     return _UPSERT_SQL, params
 

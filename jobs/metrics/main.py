@@ -389,6 +389,9 @@ def run(config: MetricsJobConfig) -> None:  # pragma: no cover - flink runtime
         MILLIS_PER_DAY,
         VALIDATION_FAILURE,
         build_metrics_dlq_envelope,
+        compute_coaching_flags,
+        compute_fatigue_score,
+        compute_readiness_score,
         compute_rolling_metrics,
         epoch_ms_now,
         is_finite_load,
@@ -512,9 +515,11 @@ def run(config: MetricsJobConfig) -> None:  # pragma: no cover - flink runtime
     )
     metrics_row_type = Types.ROW_NAMED(
         ["athlete_id", "metric_date", "acute_load", "chronic_load_28d",
-         "chronic_load_42d", "acute_chronic_ratio", "deload_flag"],
+         "chronic_load_42d", "acute_chronic_ratio", "deload_flag",
+         "fatigue_score", "readiness_score", "coaching_flags"],
         [Types.STRING(), Types.LONG(), Types.FLOAT(), Types.FLOAT(),
-         Types.FLOAT(), Types.FLOAT(), Types.INT()],
+         Types.FLOAT(), Types.FLOAT(), Types.INT(),
+         Types.FLOAT(), Types.FLOAT(), Types.STRING()],
     )
 
     # Indices into the canonical Row (source of truth: the DDL column order).
@@ -537,8 +542,11 @@ def run(config: MetricsJobConfig) -> None:  # pragma: no cover - flink runtime
     IDX_ACR_CHRONIC_42D = 4
     IDX_ACR = 5
 
-    # Indices into the metrics Row (adds deload_flag at position 6).
+    # Indices into the metrics Row (adds deload_flag at position 6; scores at 7-9).
     IDX_METRICS_DELOAD_FLAG = 6
+    IDX_METRICS_FATIGUE = 7
+    IDX_METRICS_READINESS = 8
+    IDX_METRICS_COACHING_FLAGS = 9
 
     # --- DLQ / late side-output tags ----------------------------------------
     # NaN guard emits JSON strings; late side outputs carry the late elements.
@@ -857,6 +865,13 @@ CREATE TABLE canonical_training_event_source (
                 return  # out of order (event-time windows keep order; safety)
             new_count, new_sign, flag = update_deload_state(count, sign, acr)
             self._state.update((int(metric_date), int(new_count), int(new_sign)))
+            # Compute load-based scores (metrics-v2 — additive, no windowing change).
+            fatigue = compute_fatigue_score(value[IDX_ACR_ACUTE], value[IDX_ACR_CHRONIC_42D])
+            readiness = compute_readiness_score(acr, value[IDX_ACR_CHRONIC_28D])
+            flags_list = compute_coaching_flags(int(flag), fatigue, readiness)
+            # Encode None as float('nan') for FLOAT Row fields (same pattern as acr_wire).
+            fatigue_wire = float("nan") if fatigue is None else float(fatigue)
+            readiness_wire = float("nan") if readiness is None else float(readiness)
             yield Row(
                 value[IDX_ACR_ATHLETE_ID],
                 value[IDX_ACR_METRIC_DATE],
@@ -865,6 +880,9 @@ CREATE TABLE canonical_training_event_source (
                 value[IDX_ACR_CHRONIC_42D],
                 value[IDX_ACR],
                 int(flag),
+                fatigue_wire,
+                readiness_wire,
+                json.dumps(flags_list),
             )
 
     metrics_stream = (
@@ -993,6 +1011,9 @@ CREATE TABLE canonical_training_event_source (
                     "chronic_load_42d": value[IDX_ACR_CHRONIC_42D],
                     "acute_chronic_ratio": value[IDX_ACR],
                     "deload_flag": value[IDX_METRICS_DELOAD_FLAG],
+                    "fatigue_score": value[IDX_METRICS_FATIGUE],
+                    "readiness_score": value[IDX_METRICS_READINESS],
+                    "coaching_flags": value[IDX_METRICS_COACHING_FLAGS],
                 }
                 try:
                     # upsert_with_retry handles exponential back-off, dead-
