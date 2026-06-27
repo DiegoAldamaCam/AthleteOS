@@ -109,38 +109,54 @@ def redpanda_bootstrap(redpanda_dlq) -> str:
     return redpanda_dlq.get_bootstrap_server()
 
 
-@pytest.fixture(scope="module")
-def redpanda_api_client(redpanda_bootstrap):
-    """TestClient for the FastAPI app backed by the Redpanda container."""
-    os.environ["KAFKA_BOOTSTRAP_SERVERS"] = redpanda_bootstrap
-    os.environ["DATABASE_URL"] = "postgresql://athleteos:athleteos@localhost:5432/athleteos"
-    os.environ["CORS_ORIGINS"] = "http://localhost:5173"
+_RELOAD_ENV_KEYS = ("KAFKA_BOOTSTRAP_SERVERS", "DATABASE_URL", "CORS_ORIGINS")
 
-    # Reset cached AdminClient singleton so it picks up the new bootstrap servers
-    try:
-        import api.kafka_admin as _ka
-        _ka._admin_client_singleton = None  # noqa: SLF001
-    except (ImportError, AttributeError):
-        pass
 
-    # Force Settings reload with the updated env
+def _reload_api_modules() -> None:
+    """Reload api.* so module-scoped settings/singletons pick up current env."""
     import importlib
     try:
         import api.config as _cfg
         importlib.reload(_cfg)
         import api.kafka_admin as _ka
+        _ka._admin_client_singleton = None  # noqa: SLF001
         importlib.reload(_ka)
         import api.routers.pipeline as _rp
         importlib.reload(_rp)
         import api.main as _main
         importlib.reload(_main)
-    except ImportError:
+    except (ImportError, AttributeError):
         pass
+
+
+@pytest.fixture(scope="module")
+def redpanda_api_client(redpanda_bootstrap):
+    """TestClient for the FastAPI app backed by the Redpanda container.
+
+    Backs up and restores the mutated env keys on teardown so this module does
+    not bleed a stale bootstrap address / reloaded api.main into other test
+    modules that run later in the same session.
+    """
+    _env_backup = {k: os.environ.get(k) for k in _RELOAD_ENV_KEYS}
+
+    os.environ["KAFKA_BOOTSTRAP_SERVERS"] = redpanda_bootstrap
+    os.environ["DATABASE_URL"] = "postgresql://athleteos:athleteos@localhost:5432/athleteos"
+    os.environ["CORS_ORIGINS"] = "http://localhost:5173"
+
+    _reload_api_modules()
 
     from api.main import app  # noqa: PLC0415
 
     with TestClient(app) as client:
         yield client
+
+    # Teardown: restore env and reload modules back to the restored environment
+    for key, value in _env_backup.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    _reload_api_modules()
 
 
 # ---------------------------------------------------------------------------
@@ -211,16 +227,28 @@ def test_partial_topic_failure_nonexistent_is_depth_zero(redpanda_api_client, re
     # Ensure the third topic does NOT exist (never created)
     # Note: in a fresh Redpanda container the topic won't exist
 
+    # Reset singleton so the client reconnects and sees current topic metadata
+    try:
+        import api.kafka_admin as _ka
+        _ka._admin_client_singleton = None  # noqa: SLF001
+    except (ImportError, AttributeError):
+        pass
+
     resp = redpanda_api_client.get("/pipeline/dlq-depth")
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["broker_reachable"] is True
 
-    for topic_entry in body["topics"]:
-        # All entries must have valid depth (0 or more) and valid status
-        assert topic_entry["depth"] is not None, f"depth should not be null when broker is reachable"
-        assert topic_entry["status"] in ("ok", "warning"), f"Unexpected status: {topic_entry['status']}"
+    # The non-existent topic MUST be reported as depth 0 / status "ok" — the core
+    # S4 contract: a missing topic is "empty" (no unprocessed messages), NOT an error.
+    missing_entry = next(
+        (t for t in body["topics"] if t["topic"] == "dlq.canonical.planning_block"),
+        None,
+    )
+    assert missing_entry is not None, "dlq.canonical.planning_block missing from response"
+    assert missing_entry["depth"] == 0, f"Missing topic must be depth 0, got {missing_entry['depth']}"
+    assert missing_entry["status"] == "ok", f"Missing topic must be status 'ok', got {missing_entry['status']}"
 
 
 # ---------------------------------------------------------------------------
@@ -230,30 +258,32 @@ def test_partial_topic_failure_nonexistent_is_depth_zero(redpanda_api_client, re
 
 @pytest.fixture(scope="module")
 def stopped_broker_client():
-    """API client configured to point at a stopped/unreachable broker."""
+    """API client configured to point at a stopped/unreachable broker.
+
+    Restores env and reloads api.* on teardown so the unreachable
+    localhost:19999 address and the broker-down api.main do not leak into other
+    test modules (e.g. test_api_metrics) that run later in the same session.
+    """
+    _env_backup = {k: os.environ.get(k) for k in _RELOAD_ENV_KEYS}
+
     os.environ["KAFKA_BOOTSTRAP_SERVERS"] = "localhost:19999"  # nothing listening here
     os.environ["DATABASE_URL"] = "postgresql://athleteos:athleteos@localhost:5432/athleteos"
     os.environ["CORS_ORIGINS"] = "http://localhost:5173"
 
-    # Reset and reload modules so the new bootstrap servers are picked up
-    import importlib
-    try:
-        import api.config as _cfg
-        importlib.reload(_cfg)
-        import api.kafka_admin as _ka
-        _ka._admin_client_singleton = None  # noqa: SLF001
-        importlib.reload(_ka)
-        import api.routers.pipeline as _rp
-        importlib.reload(_rp)
-        import api.main as _main
-        importlib.reload(_main)
-    except (ImportError, AttributeError):
-        pass
+    _reload_api_modules()
 
     from api.main import app  # noqa: PLC0415
 
     with TestClient(app) as client:
         yield client
+
+    # Teardown: restore env and reload modules back to the restored environment
+    for key, value in _env_backup.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    _reload_api_modules()
 
 
 def test_kafka_unreachable_returns_200_degraded_envelope(stopped_broker_client):

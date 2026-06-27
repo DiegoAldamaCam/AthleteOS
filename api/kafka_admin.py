@@ -112,7 +112,12 @@ def get_dlq_depths(
         admin = _get_or_create_admin_client(bootstrap_servers, request_timeout)
         return _compute_depths(admin, dlq_topics, request_timeout)
     except Exception:
-        # Any failure (broker down, timeout, auth, etc.) → degraded envelope
+        # Any failure (broker down, timeout, auth, etc.) → degraded envelope.
+        # Clear the cached client so the next request rebuilds it: the singleton
+        # is assigned before any I/O, so a first-call failure must not leave a
+        # client pinned to a stale/unreachable bootstrap address forever.
+        global _admin_client_singleton  # noqa: PLW0603
+        _admin_client_singleton = None
         return build_degraded_response(dlq_topics)
 
 
