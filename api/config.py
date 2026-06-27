@@ -28,6 +28,16 @@ class Settings(BaseSettings):
         """Return CORS origins as a list (comma-separated string → list)."""
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
+    @property
+    def db_connect_timeout_seconds(self) -> int:
+        """psycopg2-safe connect timeout in whole seconds (minimum 1).
+
+        libpq requires an integer and treats 0 as "wait indefinitely". A naive
+        int(0.5) == 0 would silently re-open the unbounded-wait hole this timeout
+        exists to close, so we clamp to a minimum of 1 second.
+        """
+        return max(1, round(self.db_connect_timeout))
+
     @model_validator(mode="after")
     def _reject_wildcard_with_credentials(self) -> "Settings":
         """Reject '*' in CORS origins when credentials are enabled.

@@ -87,7 +87,7 @@ def _probe_db() -> None:
 
     conn = psycopg2.connect(
         settings.database_url,
-        connect_timeout=int(settings.db_connect_timeout),
+        connect_timeout=settings.db_connect_timeout_seconds,
     )
     try:
         with conn.cursor() as cur:

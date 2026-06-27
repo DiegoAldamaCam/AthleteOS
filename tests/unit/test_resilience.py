@@ -36,6 +36,21 @@ class TestConnectTimeout:
         assert hasattr(s, "db_connect_timeout"), "Settings missing db_connect_timeout field"
         assert s.db_connect_timeout == 5.0, f"Expected 5.0, got {s.db_connect_timeout}"
 
+    def test_sub_second_timeout_clamps_to_one_not_zero(self):
+        """db_connect_timeout_seconds must never round to 0 (libpq treats 0 as infinite wait).
+
+        Regression guard for the int(0.5)==0 footgun: a fractional value must
+        clamp to a minimum of 1 second, not silently disable the timeout.
+        """
+        from api.config import Settings
+
+        s = Settings(database_url="postgresql://u:p@localhost/db", db_connect_timeout=0.5)
+        assert s.db_connect_timeout_seconds == 1, (
+            f"sub-second timeout must clamp to 1, got {s.db_connect_timeout_seconds}"
+        )
+        s2 = Settings(database_url="postgresql://u:p@localhost/db", db_connect_timeout=5.0)
+        assert s2.db_connect_timeout_seconds == 5
+
     def test_db_connect_passes_connect_timeout_to_psycopg2(self, monkeypatch):
         """api/db.py get_db() must pass connect_timeout=settings.db_connect_timeout to psycopg2.connect."""
         import importlib
