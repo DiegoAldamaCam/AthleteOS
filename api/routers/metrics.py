@@ -49,7 +49,8 @@ _SQL_METRICS_RANGE = """
         deload_flag,
         fatigue_score,
         readiness_score,
-        coaching_flags
+        coaching_flags,
+        recovery_score
     FROM athlete_metrics
     WHERE athlete_id = %s
       AND metric_date BETWEEN %s AND %s

@@ -306,3 +306,50 @@ def upsert_with_retry(
 
     assert last_exc is not None  # always set after at least one failed attempt
     raise last_exc
+
+
+# ---------------------------------------------------------------------------
+# Recovery-score UPSERT (wellness-metrics job — ADR-17, W3-7/W3-8)
+# ---------------------------------------------------------------------------
+#
+# CRITICAL: _RECOVERY_UPSERT_SQL is a SEPARATE constant from _UPSERT_SQL.
+# DO NOT modify _UPSERT_SQL or build_upsert above.
+#
+# This INSERT lists ONLY 3 columns: (athlete_id, metric_date, recovery_score).
+# With ADR-19 in effect (DROP NOT NULL on the four load columns), omitting the
+# load columns on an INSERT is valid — they default to NULL = "not yet computed".
+#
+# DO UPDATE SET touches ONLY recovery_score:
+#   - On an existing row: load columns are untouched (W3-7).
+#   - On a new row: load columns are NULL (W3-FIRSTWRITE).
+#   The load UPSERT (_UPSERT_SQL) never names recovery_score (W3-8).
+
+_RECOVERY_UPSERT_SQL: str = """
+INSERT INTO athlete_metrics (athlete_id, metric_date, recovery_score)
+VALUES (%s, %s, %s)
+ON CONFLICT (athlete_id, metric_date)
+DO UPDATE SET recovery_score = EXCLUDED.recovery_score
+""".strip()
+
+
+def build_recovery_upsert(record: dict) -> "tuple[str, tuple]":
+    """Build the parameterized recovery-score UPSERT SQL and params.
+
+    Args:
+        record: A dict with keys:
+            athlete_id (str),
+            metric_date (int epoch-ms),
+            recovery_score (float | None)
+
+    Returns:
+        (sql, params) where sql is _RECOVERY_UPSERT_SQL and params is a
+        3-tuple: (athlete_id_str, metric_date_as_date, recovery_score_float_or_none).
+    """
+    metric_date_val: "datetime.date" = epoch_ms_to_date(int(record["metric_date"]))
+    recovery: "float | None" = _sanitize_float(record.get("recovery_score"))
+    params: tuple = (
+        str(record["athlete_id"]),
+        metric_date_val,
+        recovery,
+    )
+    return _RECOVERY_UPSERT_SQL, params

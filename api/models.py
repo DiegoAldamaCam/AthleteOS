@@ -26,3 +26,5 @@ class MetricRow(BaseModel):
     fatigue_score: Optional[float] = None
     readiness_score: Optional[float] = None
     coaching_flags: Optional[list[str]] = None
+    # wellness-source: recovery score (additive, nullable — W3-10/W3-11)
+    recovery_score: Optional[float] = None

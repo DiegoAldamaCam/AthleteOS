@@ -15,6 +15,8 @@ export interface MetricRow {
   fatigue_score: number | null
   readiness_score: number | null
   coaching_flags: string[] | null
+  // wellness-source: recovery score (additive, nullable — W3-12/W3-13)
+  recovery_score: number | null
 }
 
 export type DlqStatus = 'ok' | 'warning' | 'unavailable'
