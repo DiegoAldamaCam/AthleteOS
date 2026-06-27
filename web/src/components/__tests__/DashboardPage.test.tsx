@@ -215,6 +215,24 @@ describe('Scenario: sparse-gap — densified series preserves null gap', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Scenario 6-b: statusText passthrough — DLQ error with statusText
+// ---------------------------------------------------------------------------
+describe('Scenario: statusText passthrough in DLQ error', () => {
+  it('surfaces statusText "Service Unavailable" inside role="alert" when DLQ fetch fails', async () => {
+    mockFetchMetrics.mockResolvedValue(makeMetricRows(3))
+    mockFetchDlqDepth.mockRejectedValue(
+      new Error('API error 503: Service Unavailable'),
+    )
+
+    renderDashboard(makeClient())
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toBeInTheDocument()
+    expect(alert).toHaveTextContent('Service Unavailable')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Scenario 6: DLQ broker unreachable
 // ---------------------------------------------------------------------------
 describe('Scenario: dlq-broker-unreachable', () => {

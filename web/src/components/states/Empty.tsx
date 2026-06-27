@@ -1,6 +1,6 @@
 export default function Empty() {
   return (
-    <div>
+    <div role="status">
       No training data available
     </div>
   )

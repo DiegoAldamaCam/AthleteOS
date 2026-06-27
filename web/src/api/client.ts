@@ -1,6 +1,13 @@
 import type { MetricRow, DlqDepthResponse } from './types'
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? 'http://localhost:8000'
+const _apiBaseRaw = import.meta.env.VITE_API_BASE_URL as string | undefined
+if (!_apiBaseRaw) {
+  throw new Error(
+    'VITE_API_BASE_URL is not set. ' +
+      'Define it in your .env file or CI environment before starting the app.',
+  )
+}
+const API_BASE = _apiBaseRaw
 
 async function apiFetch<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`)
