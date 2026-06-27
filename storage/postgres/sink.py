@@ -174,20 +174,23 @@ def build_upsert(record: dict) -> tuple[str, tuple]:
 # ---------------------------------------------------------------------------
 
 
-def execute_upsert(cursor: Any, record: dict) -> None:
+def execute_upsert(cursor: Any, record: dict, *, build_fn: Callable = build_upsert) -> None:
     """Execute the UPSERT for a single metrics record.
 
     Args:
-        cursor: A psycopg2-compatible cursor (or a compatible fake for tests).
-                The cursor must expose ``execute(sql, params)``; this function
-                does not commit — the caller owns transaction management.
-        record: A metrics dict (same shape as build_upsert expects).
+        cursor:   A psycopg2-compatible cursor (or a compatible fake for tests).
+                  The cursor must expose ``execute(sql, params)``; this function
+                  does not commit — the caller owns transaction management.
+        record:   A metrics dict (same shape as the chosen build_fn expects).
+        build_fn: Callable(record) -> (sql, params). Defaults to build_upsert so
+                  every existing load-path caller is byte-for-byte unaffected.
+                  Pass build_recovery_upsert for the wellness-metrics recovery path.
 
     Design: thin wrapper so the DB I/O is injectable. The per-checkpoint
     batching loop, retry/backoff, and DLQ-on-exhaustion live in the Flink
     integration layer (work-unit 6.4, jobs/metrics/main.py).
     """
-    sql, params = build_upsert(record)
+    sql, params = build_fn(record)
     cursor.execute(sql, params)
 
 
@@ -211,6 +214,8 @@ def upsert_with_retry(
     conn_factory: Callable[[], Any],
     max_retries: int = 3,
     base_backoff_s: float = 0.5,
+    *,
+    build_fn: Callable = build_upsert,
 ) -> Any:
     """Execute one metrics UPSERT with exponential-backoff retry and reconnect.
 
@@ -223,7 +228,7 @@ def upsert_with_retry(
     that use fake connections do not need psycopg2 installed.
 
     Args:
-        record:         A metrics dict (same shape as build_upsert / execute_upsert).
+        record:         A metrics dict (same shape as the chosen build_fn expects).
         conn:           An open psycopg2-compatible connection.  The object is
                         mutated in-place: on OperationalError / InterfaceError
                         the stale connection is closed and ``conn`` is replaced
@@ -237,6 +242,10 @@ def upsert_with_retry(
                         Sleep = base_backoff_s * 2^attempt before each retry.
                         Default 0.5 s → 0.5 / 1.0 / 2.0 s between the first
                         three attempts.
+        build_fn:       Callable(record) -> (sql, params). Defaults to
+                        build_upsert so every existing load-path caller is
+                        byte-for-byte unaffected. Pass build_recovery_upsert
+                        for the wellness-metrics recovery path.
 
     Returns:
         The (possibly new) connection object after the final attempt.  Always
@@ -278,7 +287,7 @@ def upsert_with_retry(
     for attempt in range(max_retries):
         try:
             cur = conn.cursor()
-            execute_upsert(cur, record)
+            execute_upsert(cur, record, build_fn=build_fn)
             conn.commit()
             cur.close()
             return conn

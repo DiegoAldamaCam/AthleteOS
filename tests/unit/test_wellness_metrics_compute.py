@@ -73,13 +73,20 @@ class TestComputeRecoveryScoreFormulaA:
         )
 
     def test_w3_2_hrv_baseline_zero_guard_no_zero_division(self):
-        """W3-2: hrv_baseline=0.0 must use max(hrv_baseline, 1.0) — no ZeroDivisionError."""
-        # hrv=65, baseline is treated as 1.0 (guard)
-        # normalized_hrv = clamp((65/1.0 - 0.5)/1.0, 0, 1) = clamp(64.5, 0, 1) = 1.0
-        # score = 1.0*50 + 1.0*30 + 1.0*20 = 100.0
+        """W3-2: hrv_baseline=0.0 must use max(hrv_baseline, 1.0) — no ZeroDivisionError.
+
+        Exact derivation:
+          guarded_baseline = max(0.0, 1.0) = 1.0
+          normalized_hrv   = clamp((65/1.0 - 0.5)/1.0, 0, 1) = clamp(64.5, 0, 1) = 1.0
+          sleep_score      = clamp(8.0/8, 0, 1) = 1.0
+          perceived_score  = clamp(10/10, 0, 1) = 1.0
+          score            = 1.0*50 + 1.0*30 + 1.0*20 = 100.0
+        """
         result = compute_recovery_score(65.0, 0.0, 8.0, 10)
         assert result is not None, "Must not return None on hrv_baseline=0"
-        assert 0.0 <= result <= 100.0, f"Result must be in [0, 100], got {result}"
+        assert math.isclose(result, 100.0, abs_tol=0.01), (
+            f"Expected exactly 100.0 (guarded baseline=1.0, all max inputs), got {result}"
+        )
 
     def test_hrv_present_sleep_and_perceived_null_degrades_gracefully(self):
         """hrv present but sleep_hours=None, perceived_recovery=None.

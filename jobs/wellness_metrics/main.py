@@ -75,7 +75,7 @@ def run(cfg: Optional[WellnessMetricsJobConfig] = None) -> None:
         cfg = WellnessMetricsJobConfig()
 
     # Lazy imports — only executed when the Flink runtime is present
-    from pyflink.datastream import StreamExecutionEnvironment  # type: ignore
+    from pyflink.datastream import RuntimeExecutionMode, StreamExecutionEnvironment  # type: ignore
     from pyflink.datastream.functions import KeyedProcessFunction, RuntimeContext  # type: ignore
     from pyflink.datastream.state import ValueStateDescriptor  # type: ignore
     from pyflink.common.typeinfo import Types  # type: ignore
@@ -216,6 +216,7 @@ def run(cfg: Optional[WellnessMetricsJobConfig] = None) -> None:
                     lambda: _psycopg2.connect(self._cfg.postgres_dsn),
                     max_retries=3,
                     base_backoff_s=0.5,
+                    build_fn=build_recovery_upsert,
                 )
             except Exception as exc:  # noqa: BLE001
                 # Log and continue — a single bad event must not crash the job

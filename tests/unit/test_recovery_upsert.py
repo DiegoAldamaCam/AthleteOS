@@ -20,6 +20,7 @@ from storage.postgres.sink import (
     _UPSERT_SQL,
     build_recovery_upsert,
     epoch_ms_to_date,
+    upsert_with_retry,
 )
 
 
@@ -173,3 +174,109 @@ class TestLoadUpsertSqlNonOverlap:
             assert col not in _RECOVERY_UPSERT_SQL, (
                 f"_RECOVERY_UPSERT_SQL must NOT contain load column {col!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 proof: upsert_with_retry with build_fn=build_recovery_upsert uses
+# _RECOVERY_UPSERT_SQL (not the load SQL)
+# ---------------------------------------------------------------------------
+
+
+class TestUpsertWithRetryBuildFnInjection:
+    """Proves build_fn is plumbed through upsert_with_retry → execute_upsert.
+
+    Uses a fake cursor that captures (sql, params) so we can assert which SQL
+    constant was actually executed — without a real DB.
+    """
+
+    def test_upsert_with_retry_uses_recovery_sql_when_build_fn_injected(self):
+        """upsert_with_retry(..., build_fn=build_recovery_upsert) must call
+        cursor.execute with _RECOVERY_UPSERT_SQL, not _UPSERT_SQL.
+
+        This is the FIX-1 proof: before the fix, the hardcoded build_upsert call
+        inside execute_upsert would trigger KeyError: 'acute_load' on a recovery
+        record and the wrong SQL would be used.
+        """
+        from unittest.mock import MagicMock
+
+        executed_sqls: list[str] = []
+
+        fake_cursor = MagicMock()
+        fake_cursor.__enter__ = lambda s: s
+        fake_cursor.__exit__ = MagicMock(return_value=False)
+        fake_cursor.execute.side_effect = lambda sql, params: executed_sqls.append(sql)
+
+        fake_conn = MagicMock()
+        fake_conn.cursor.return_value = fake_cursor
+        fake_conn.closed = 0
+
+        record = {
+            "athlete_id": "ath_fix1",
+            "metric_date": _JAN_1_2025_EPOCH_MS,
+            "recovery_score": 73.29,
+        }
+
+        upsert_with_retry(
+            record,
+            fake_conn,
+            lambda: fake_conn,
+            max_retries=1,
+            base_backoff_s=0.0,
+            build_fn=build_recovery_upsert,
+        )
+
+        assert len(executed_sqls) == 1, f"Expected exactly 1 execute call, got {len(executed_sqls)}"
+        used_sql = executed_sqls[0]
+        assert used_sql == _RECOVERY_UPSERT_SQL, (
+            "FIX-1: upsert_with_retry with build_fn=build_recovery_upsert must use "
+            "_RECOVERY_UPSERT_SQL, not the load SQL. "
+            f"Got:\n{used_sql!r}\nExpected:\n{_RECOVERY_UPSERT_SQL!r}"
+        )
+        assert _UPSERT_SQL not in executed_sqls, (
+            "FIX-1: The load _UPSERT_SQL must NOT be called when build_fn=build_recovery_upsert"
+        )
+
+    def test_upsert_with_retry_default_still_uses_load_sql(self):
+        """upsert_with_retry with default build_fn must still use _UPSERT_SQL.
+
+        Regression guard: FIX-1 must not break the existing load path.
+        """
+        from unittest.mock import MagicMock
+
+        executed_sqls: list[str] = []
+
+        fake_cursor = MagicMock()
+        fake_cursor.__enter__ = lambda s: s
+        fake_cursor.__exit__ = MagicMock(return_value=False)
+        fake_cursor.execute.side_effect = lambda sql, params: executed_sqls.append(sql)
+
+        fake_conn = MagicMock()
+        fake_conn.cursor.return_value = fake_cursor
+        fake_conn.closed = 0
+
+        record = {
+            "athlete_id": "ath_load",
+            "metric_date": _JAN_1_2025_EPOCH_MS,
+            "acute_load": 100.0,
+            "chronic_load_28d": 90.0,
+            "chronic_load_42d": 85.0,
+            "acute_chronic_ratio": 1.1,
+            "deload_flag": 0,
+            "fatigue_score": 20.0,
+            "readiness_score": 65.0,
+            "coaching_flags": "[]",
+        }
+
+        upsert_with_retry(
+            record,
+            fake_conn,
+            lambda: fake_conn,
+            max_retries=1,
+            base_backoff_s=0.0,
+            # No build_fn → defaults to build_upsert
+        )
+
+        assert len(executed_sqls) == 1
+        assert executed_sqls[0] == _UPSERT_SQL, (
+            "Default build_fn must produce _UPSERT_SQL (load path regression guard)"
+        )

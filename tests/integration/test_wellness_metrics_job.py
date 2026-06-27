@@ -81,9 +81,25 @@ def pg_conn(pg_dsn):
     conn.autocommit = True
     with conn.cursor() as cur:
         cur.execute(_CREATE_TABLE)
+    # FIX 5: Delete test athlete rows so CI reruns are deterministic.
+    # scope="module" means this runs once per module start; the DELETE ensures
+    # W3-FIRSTWRITE's `assert pre_row is None` never fails on a retry.
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM athlete_metrics WHERE athlete_id = ANY(%s)",
+            ([_ATHLETE_W3_7, _ATHLETE_W3_8, _ATHLETE_FIRSTWRITE],),
+        )
     yield conn
     conn.close()
 
+
+# ---------------------------------------------------------------------------
+# Test athlete IDs and dates used across all W3 tests
+# ---------------------------------------------------------------------------
+
+_ATHLETE_W3_7 = "W3_7_ATHLETE"
+_ATHLETE_W3_8 = "W3_8_ATHLETE"
+_ATHLETE_FIRSTWRITE = "W3_FIRSTWRITE_ATHLETE"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -131,7 +147,8 @@ def _do_recovery_upsert(conn, athlete_id: str, epoch_ms: int, recovery_score: fl
         "recovery_score": recovery_score,
     }
     upsert_with_retry(record, conn, lambda: psycopg2.connect(conn.dsn),
-                      max_retries=1, base_backoff_s=0.0)
+                      max_retries=1, base_backoff_s=0.0,
+                      build_fn=build_recovery_upsert)
 
 
 def _do_load_upsert(conn, athlete_id: str, epoch_ms: int, fatigue_score: float) -> None:
@@ -186,7 +203,7 @@ def test_recovery_upsert_preserves_fatigue_score(pg_conn):
 
     Proves the recovery UPSERT's DO UPDATE SET only touches recovery_score.
     """
-    athlete_id = "W3_7_ATHLETE"
+    athlete_id = _ATHLETE_W3_7
     _seed_full_row(pg_conn, athlete_id, _DATE_W3_7, fatigue_score=75.0)
 
     _do_recovery_upsert(pg_conn, athlete_id, _EPOCH_W3_7, recovery_score=80.0)
@@ -212,7 +229,7 @@ def test_load_upsert_preserves_recovery_score(pg_conn):
 
     Proves the load UPSERT's DO UPDATE SET never names recovery_score.
     """
-    athlete_id = "W3_8_ATHLETE"
+    athlete_id = _ATHLETE_W3_8
     _seed_full_row(pg_conn, athlete_id, _DATE_W3_8, fatigue_score=60.0, recovery_score=80.0)
 
     _do_load_upsert(pg_conn, athlete_id, _EPOCH_W3_8, fatigue_score=72.0)
@@ -248,7 +265,7 @@ def test_recovery_first_write_no_prior_load_row(pg_conn):
       - chronic_load_42d IS NULL
       - deload_flag IS NULL
     """
-    athlete_id = "W3_FIRSTWRITE_ATHLETE"
+    athlete_id = _ATHLETE_FIRSTWRITE
 
     # Confirm no prior row for this PK
     pre_row = _fetch_row(pg_conn, athlete_id, _DATE_FIRSTWRITE)
