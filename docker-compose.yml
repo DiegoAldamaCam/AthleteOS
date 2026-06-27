@@ -29,8 +29,11 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      # Stable short cluster id (base64 uuid, 22 chars) for KRaft storage.
-      CLUSTER_ID: "AthlOSFndtnKRaft1"
+      # KRaft cluster id: a 128-bit UUID encoded as 22-char base64url (no
+      # padding), as produced by `kafka-storage random-uuid`. It is NOT an
+      # arbitrary string: Kafka base64-decodes it and requires exactly 16 bytes,
+      # so a hand-written label fails preflight with "not a valid UUID".
+      CLUSTER_ID: "Sdry9tBASdKvUsLwV--CJA"
     ports:
       - "9092:9092"
     healthcheck:
