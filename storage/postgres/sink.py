@@ -22,6 +22,12 @@ execute_upsert(cursor, record: dict) -> None
     Thin wrapper around cursor.execute(sql, params) — injectable for unit tests
     via a fake/mock cursor (no real DB required).
 
+upsert_with_retry(record, conn, conn_factory, max_retries, base_backoff_s) -> None
+    Execute the UPSERT for one record with exponential-backoff retry and
+    automatic reconnect on OperationalError / InterfaceError.  Extracted from
+    _PgUpsertFn.process_element (jobs/metrics/main.py) so the reconnect path
+    is unit-testable without a Flink runtime.
+
 Design notes
 ------------
 - Retry / backoff / DLQ-on-exhaustion wiring happens at the Flink integration
@@ -34,14 +40,14 @@ from __future__ import annotations
 
 import datetime
 import math
-from typing import Any
+import time
+from typing import Any, Callable
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 _MILLIS_PER_SECOND: int = 1_000
-_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 # UPSERT SQL template (parameterized with %s — psycopg2 style).
 # Parameter order matches _record_to_params().
@@ -162,3 +168,120 @@ def execute_upsert(cursor: Any, record: dict) -> None:
     """
     sql, params = build_upsert(record)
     cursor.execute(sql, params)
+
+
+# ---------------------------------------------------------------------------
+# upsert_with_retry
+# ---------------------------------------------------------------------------
+
+
+class _PsycopgLike:
+    """Structural type hint for objects that look like psycopg2 connections."""
+
+    def cursor(self) -> Any: ...  # noqa: E704
+    def commit(self) -> None: ...  # noqa: E704
+    def rollback(self) -> None: ...  # noqa: E704
+    def close(self) -> None: ...  # noqa: E704
+
+
+def upsert_with_retry(
+    record: dict,
+    conn: Any,
+    conn_factory: Callable[[], Any],
+    max_retries: int = 3,
+    base_backoff_s: float = 0.5,
+) -> Any:
+    """Execute one metrics UPSERT with exponential-backoff retry and reconnect.
+
+    Extracted from _PgUpsertFn.process_element in jobs/metrics/main.py so the
+    reconnect-on-OperationalError path is fully unit-testable without a Flink
+    runtime or a real PostgreSQL instance.
+
+    The function is intentionally pyflink-free and psycopg2-import-free at the
+    module level: psycopg2 is imported lazily inside the function body.  Tests
+    that use fake connections do not need psycopg2 installed.
+
+    Args:
+        record:         A metrics dict (same shape as build_upsert / execute_upsert).
+        conn:           An open psycopg2-compatible connection.  The object is
+                        mutated in-place: on OperationalError / InterfaceError
+                        the stale connection is closed and ``conn`` is replaced
+                        by a fresh connection from ``conn_factory``.  The *caller*
+                        must store the returned connection to track the new object.
+        conn_factory:   Zero-argument callable that returns a fresh psycopg2-
+                        compatible connection.  Called automatically when the
+                        current connection is detected as dead.
+        max_retries:    Total number of attempts (default 3).  Must be >= 1.
+        base_backoff_s: Base sleep interval in seconds for exponential back-off.
+                        Sleep = base_backoff_s * 2^attempt before each retry.
+                        Default 0.5 s → 0.5 / 1.0 / 2.0 s between the first
+                        three attempts.
+
+    Returns:
+        The (possibly new) connection object after the final attempt.  Always
+        return the connection so callers can update their reference even after
+        a successful reconnect.
+
+    Raises:
+        Exception: Re-raises the last exception if all ``max_retries`` attempts
+                   fail (including reconnect attempts).  The caller is responsible
+                   for logging, incrementing counters, and deciding whether to drop
+                   or DLQ the record.
+
+    Design notes:
+    - Dead-connection detection: psycopg2 sets conn.closed != 0 on any fatal
+      connection error (server-side kill, network loss, idle-in-transaction
+      timeout).  We also treat OperationalError and InterfaceError as signals
+      that the connection may be broken, even when conn.closed == 0, because
+      some proxy / PgBouncer configurations close the transport without
+      updating the Python connection object.
+    - Transaction management: we issue rollback() before reconnecting to
+      release server-side resources.  On a dead connection rollback() may
+      raise; we silently swallow that to ensure the reconnect proceeds.
+    - Idempotency: the UPSERT SQL uses ON CONFLICT DO UPDATE, so replaying
+      the same record after a transient failure is safe.
+    """
+    # Lazy import: psycopg2 is only available in the Flink runtime.
+    # Unit tests that use fake connections bypass this import entirely.
+    try:
+        import psycopg2 as _psycopg2  # type: ignore[import]
+        _OPERATIONAL_ERROR = _psycopg2.OperationalError
+        _INTERFACE_ERROR = _psycopg2.InterfaceError
+    except ImportError:
+        # psycopg2 not installed (e.g. unit test environment).  Use Exception
+        # as a fallback so the reconnect logic is still reachable via fakes.
+        _OPERATIONAL_ERROR = Exception  # type: ignore[assignment,misc]
+        _INTERFACE_ERROR = Exception  # type: ignore[assignment,misc]
+
+    last_exc: BaseException | None = None
+    for attempt in range(max_retries):
+        try:
+            cur = conn.cursor()
+            execute_upsert(cur, record)
+            conn.commit()
+            cur.close()
+            return conn
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            # Rollback any partial transaction; ignore rollback errors on
+            # dead connections (the close / reconnect below clears them).
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            # Reconnect if the connection is dead or the error suggests it.
+            conn_dead = (
+                getattr(conn, "closed", 0) != 0
+                or isinstance(exc, (_OPERATIONAL_ERROR, _INTERFACE_ERROR))
+            )
+            if conn_dead and attempt < max_retries - 1:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                conn = conn_factory()
+            if attempt < max_retries - 1:
+                time.sleep(base_backoff_s * (2 ** attempt))
+
+    assert last_exc is not None  # always set after at least one failed attempt
+    raise last_exc

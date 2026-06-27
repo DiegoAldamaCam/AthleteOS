@@ -31,12 +31,11 @@ It detects:
 
 Float tolerance
 ---------------
-The ``tolerance`` parameter is accepted and stored for future cross-grain
-numeric parity extensions (e.g. sum of session_load per day vs acute_load
-regression).  The current coverage-only check does not apply float comparisons
-across stores because the grains are incompatible.  Tolerance IS used when
-computing integer/float day keys from epoch-ms values (rounding guard), so
-the parameter is meaningful and not silently ignored.
+The ``tolerance`` parameter is accepted for future cross-grain numeric parity
+extensions (e.g. sum of session_load per day vs acute_load regression).
+The current coverage-only check does not apply float comparisons across
+stores because the grains are incompatible.  Tolerance is validated as a
+float and stored but is not yet applied to any comparison logic.
 
 Mismatch record shape
 ---------------------
@@ -83,7 +82,6 @@ from typing import Any
 
 _MS_PER_DAY: int = 86_400_000
 _US_PER_MS: int = 1_000
-_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
 
 
 def _to_day_epoch_ms(value: Any) -> int:
@@ -152,7 +150,8 @@ def check_parity(
         pg_rows: Rows from athlete_metrics (keys: athlete_id, metric_date).
         iceberg_rows: Rows from training_event (keys: athlete_id, event_time).
         tolerance: Float tolerance for future numeric parity extensions.
-                   Accepted and stored; not applied to coverage-only logic.
+                   Accepted and validated as float; not yet applied to the
+                   current coverage-only check.
 
     Returns:
         List of mismatch dicts.  Empty list → both stores agree on key coverage.
@@ -202,8 +201,9 @@ def check_parity(
         )
 
     # tolerance is reserved for future numeric cross-grain parity extensions
-    # (e.g. sum(session_load) per day vs acute_load).  It is accepted as a
-    # parameter now so callers can wire it without an API change in 6.4.
+    # (e.g. sum(session_load) per day vs acute_load).  Accepted now so callers
+    # can pass it without an API change when numeric comparison is added.
+    # It is NOT applied to the current coverage-only check.
     _tolerance = float(tolerance)  # validate it is a valid float; suppress lint
 
     return mismatches

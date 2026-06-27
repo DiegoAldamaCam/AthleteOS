@@ -177,10 +177,10 @@ def read_training_events(
         con = duckdb.connect(":memory:")
 
     try:
-        # read_parquet accepts a list of file paths
-        placeholders = ", ".join(f"'{f}'" for f in file_strings)
-        sql = f"SELECT * FROM read_parquet([{placeholders}])"
-        relation = con.execute(sql)
+        # read_parquet accepts a list of file paths via parameter binding.
+        # Using parameterised query (list argument) instead of string
+        # interpolation prevents SQL injection through path values.
+        relation = con.execute("SELECT * FROM read_parquet(?)", [file_strings])
         columns = [desc[0] for desc in relation.description]
         return [dict(zip(columns, row)) for row in relation.fetchall()]
     finally:

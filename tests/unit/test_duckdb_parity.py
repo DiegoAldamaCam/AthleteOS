@@ -36,35 +36,10 @@ from pathlib import Path
 import pytest
 
 # ---------------------------------------------------------------------------
-# PyArrowFileIO Windows shim (identical to test_iceberg_sink.py)
+# PyArrowFileIO Windows shim (shared helper — see tests/_pyarrow_compat.py)
 # ---------------------------------------------------------------------------
 
-
-def _patch_pyarrow_file_io() -> None:
-    """Fix PyArrowFileIO.parse_location for Windows bare-drive paths (C:/...).
-
-    This shim is required on Windows because SqlCatalog's table creation
-    goes through PyArrowFileIO even when the read-back path is bypassed.
-    On Linux/CI this is a no-op.
-    """
-    if sys.platform != "win32":
-        return
-    from pyiceberg.io.pyarrow import PyArrowFileIO
-
-    _orig = PyArrowFileIO.parse_location
-
-    def _patched(location: str):
-        from urllib.parse import urlparse as _up
-
-        if len(location) >= 2 and location[1] == ":":
-            return "file", "", location.replace("\\", "/")
-        uri = _up(location)
-        if uri.scheme == "file" and len(uri.path) >= 3 and uri.path[2] == ":":
-            return "file", uri.netloc, uri.path[1:]
-        return _orig(location)
-
-    PyArrowFileIO.parse_location = staticmethod(_patched)
-
+from tests._pyarrow_compat import patch_pyarrow_file_io as _patch_pyarrow_file_io
 
 _patch_pyarrow_file_io()
 

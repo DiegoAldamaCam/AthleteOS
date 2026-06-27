@@ -12,13 +12,17 @@ Scenarios covered (strict TDD):
   - build_upsert: acute_chronic_ratio float('nan') -> bound param is None
   - build_upsert: normal record binds all 7 fields correctly
   - execute_upsert: batch of N records executes N upserts (or executemany)
+  - upsert_with_retry: succeeds on first attempt (no retry needed)
+  - upsert_with_retry: conn_factory called on OperationalError (reconnect path)
+  - upsert_with_retry: succeeds on second attempt after reconnect
+  - upsert_with_retry: raises after exhausting all retries
 """
 
 from __future__ import annotations
 
 import datetime
 import math
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -26,6 +30,7 @@ from storage.postgres.sink import (
     build_upsert,
     epoch_ms_to_date,
     execute_upsert,
+    upsert_with_retry,
 )
 
 
@@ -115,14 +120,24 @@ class TestBuildUpsert:
     def test_acute_chronic_ratio_none_becomes_sql_null(self):
         record = _make_record(acute_chronic_ratio=None)
         _, params = build_upsert(record)
-        # Find the acr value in params — it must be Python None (-> SQL NULL)
-        # params is a tuple/dict; we look for the None value at the right position
-        assert None in params, "acute_chronic_ratio=None must bind as None (SQL NULL)"
+        # acute_chronic_ratio is at index 5 in the params tuple
+        # (order: athlete_id[0], metric_date[1], acute_load[2],
+        #  chronic_load_28d[3], chronic_load_42d[4], acr[5], deload_flag[6]).
+        # This is a position-pinned assertion; if _record_to_params ever
+        # reorders columns, this test will catch the regression.
+        assert params[5] is None, (
+            f"acute_chronic_ratio=None must be at params[5] as None (SQL NULL), "
+            f"got {params[5]!r}"
+        )
 
     def test_acute_chronic_ratio_nan_becomes_sql_null(self):
         record = _make_record(acute_chronic_ratio=float("nan"))
         _, params = build_upsert(record)
-        assert None in params, "acute_chronic_ratio=nan must bind as None (SQL NULL)"
+        # Same position pin as above (index 5 = acute_chronic_ratio).
+        assert params[5] is None, (
+            f"acute_chronic_ratio=nan must be at params[5] as None (SQL NULL), "
+            f"got {params[5]!r}"
+        )
 
     def test_normal_record_binds_all_7_fields(self):
         record = _make_record(
@@ -213,3 +228,155 @@ class TestExecuteUpsert:
         for i, aid in enumerate(athlete_ids):
             _, params = all_calls[i][0]
             assert aid in list(params), f"expected {aid!r} in params for call {i}"
+
+
+# ---------------------------------------------------------------------------
+# upsert_with_retry tests (fake connection + fake conn_factory)
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_conn(fail_times: int = 0, error_cls: type = Exception):
+    """Build a fake psycopg2-like connection.
+
+    The fake cursor raises ``error_cls`` on the first ``fail_times`` calls to
+    ``execute()``, then succeeds.  ``conn.closed`` is 0 (open); we simulate
+    OperationalError explicitly so the reconnect branch is triggered.
+
+    Returns (conn, cursor_mock) so tests can inspect call counts.
+    """
+    cursor_mock = MagicMock()
+    call_count = {"n": 0}
+
+    def _execute(sql, params):
+        call_count["n"] += 1
+        if call_count["n"] <= fail_times:
+            raise error_cls("simulated DB error")
+
+    cursor_mock.execute.side_effect = _execute
+
+    conn = MagicMock()
+    conn.cursor.return_value = cursor_mock
+    conn.closed = 0
+    return conn, cursor_mock
+
+
+class TestUpsertWithRetry:
+    """upsert_with_retry — reconnect and exponential-backoff retry logic."""
+
+    def test_succeeds_on_first_attempt_no_retry(self):
+        """Happy path: no errors, conn_factory is never called."""
+        conn, cursor = _make_fake_conn(fail_times=0)
+        conn_factory = MagicMock()
+        record = _make_record()
+
+        with patch("storage.postgres.sink.time") as mock_time:
+            returned_conn = upsert_with_retry(
+                record, conn, conn_factory, max_retries=3, base_backoff_s=0.0
+            )
+
+        assert cursor.execute.call_count == 1, "execute must be called once on success"
+        conn_factory.assert_not_called()
+        mock_time.sleep.assert_not_called()
+        assert returned_conn is conn, "must return the original connection on success"
+
+    def test_conn_factory_called_on_operational_error(self):
+        """When OperationalError is raised, conn_factory must be called to reconnect."""
+        # We make the connection look 'dead' so the reconnect branch fires.
+        conn, cursor = _make_fake_conn(fail_times=0)
+        # Override execute to raise OperationalError only once, simulating a
+        # transient connection error, then succeed on the fresh connection.
+
+        # Use a counter to track calls across both the original and new conn.
+        call_state = {"attempt": 0}
+        fresh_cursor = MagicMock()
+
+        def _first_conn_execute(sql, params):
+            raise _FakeOperationalError("connection reset by peer")
+
+        cursor.execute.side_effect = _first_conn_execute
+
+        # fresh_cursor succeeds immediately
+        fresh_conn = MagicMock()
+        fresh_conn.cursor.return_value = fresh_cursor
+        fresh_conn.closed = 0
+        conn_factory = MagicMock(return_value=fresh_conn)
+
+        record = _make_record()
+
+        with patch("storage.postgres.sink.time") as mock_time:
+            returned_conn = upsert_with_retry(
+                record, conn, conn_factory, max_retries=3, base_backoff_s=0.0
+            )
+
+        conn_factory.assert_called_once(), "conn_factory must be called exactly once on error"
+        fresh_cursor.execute.assert_called_once(), "fresh cursor must be used after reconnect"
+        assert returned_conn is fresh_conn, "must return the new connection after reconnect"
+
+    def test_succeeds_on_second_attempt_after_reconnect(self):
+        """First attempt fails with a connection error; second attempt succeeds."""
+        conn, first_cursor = _make_fake_conn(fail_times=0)
+
+        def _dead_execute(sql, params):
+            raise _FakeOperationalError("broken pipe")
+
+        first_cursor.execute.side_effect = _dead_execute
+        conn.closed = 1  # mark as dead so reconnect branch fires
+
+        fresh_cursor = MagicMock()
+        fresh_conn = MagicMock()
+        fresh_conn.cursor.return_value = fresh_cursor
+        fresh_conn.closed = 0
+        conn_factory = MagicMock(return_value=fresh_conn)
+
+        record = _make_record(athlete_id="ath_reconnect")
+
+        with patch("storage.postgres.sink.time") as mock_time:
+            returned_conn = upsert_with_retry(
+                record, conn, conn_factory, max_retries=3, base_backoff_s=0.0
+            )
+
+        # First cursor raised; fresh cursor must have been called once.
+        assert fresh_cursor.execute.call_count == 1
+        # Verify the correct athlete_id was bound via the fresh cursor.
+        _sql, params = fresh_cursor.execute.call_args[0]
+        assert "ath_reconnect" in list(params), "correct record must be retried on fresh conn"
+        assert returned_conn is fresh_conn
+
+    def test_raises_after_exhausting_all_retries(self):
+        """When every attempt fails, upsert_with_retry re-raises the last exception."""
+        # Build an always-failing cursor so all retries exhaust.
+        always_fail_cursor = MagicMock()
+        always_fail_cursor.execute.side_effect = Exception("simulated DB error")
+
+        # Each "new" connection from conn_factory also always fails.
+        def _make_failing_conn():
+            c = MagicMock()
+            c.cursor.return_value = always_fail_cursor
+            c.closed = 0
+            return c
+
+        conn = _make_failing_conn()
+        conn_factory = MagicMock(side_effect=_make_failing_conn)
+
+        record = _make_record()
+
+        with patch("storage.postgres.sink.time"):
+            with pytest.raises(Exception, match="simulated DB error"):
+                upsert_with_retry(
+                    record, conn, conn_factory, max_retries=3, base_backoff_s=0.0
+                )
+
+        # execute must have been called once per attempt (3 total).
+        assert always_fail_cursor.execute.call_count == 3, (
+            f"expected 3 execute attempts for max_retries=3, got "
+            f"{always_fail_cursor.execute.call_count}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Helpers for TestUpsertWithRetry
+# ---------------------------------------------------------------------------
+
+
+class _FakeOperationalError(Exception):
+    """Simulates psycopg2.OperationalError without requiring psycopg2."""

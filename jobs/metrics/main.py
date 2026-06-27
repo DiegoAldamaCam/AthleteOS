@@ -168,6 +168,8 @@ COUNTER_DLQ_LATE_DAILY: str = "metrics.dlq.late_daily"
 COUNTER_DLQ_LATE_ROLLING: str = "metrics.dlq.late_rolling"
 COUNTER_DLQ_DEDUP_DROPS: str = "metrics.dedup.drops"
 COUNTER_RECORDS_PROCESSED: str = "metrics.records.processed"
+COUNTER_PG_UPSERT_DROPPED: str = "metrics.pg_upsert.dropped"
+COUNTER_ICEBERG_APPEND_FAILED: str = "metrics.iceberg_append.failed"
 
 
 def init_sentry() -> None:
@@ -839,7 +841,7 @@ CREATE TABLE canonical_training_event_source (
         def process_element(self, value: Any, ctx: Any) -> None:
             # value = acr Row(athlete_id, metric_date, acute, chronic_28d,
             #                 chronic_42d, acr)
-            metric_date = value[1]
+            metric_date = value[IDX_ACR_METRIC_DATE]
             acr_raw = value[IDX_ACR]
             # ACR is encoded as float('nan') when chronic_28d==0 (C3+F2).
             # Treat NaN identically to None: no streak assertion possible.
@@ -954,14 +956,34 @@ CREATE TABLE canonical_training_event_source (
 
                 self._conn = psycopg2.connect(config.pg_dsn)
                 self._conn.autocommit = False
+                self._runtime_context = runtime_context
+                self._counter_dropped = runtime_context.get_metrics_group().counter(
+                    COUNTER_PG_UPSERT_DROPPED
+                )
+
+            def _reconnect(self) -> Any:
+                """Open a fresh psycopg2 connection and return it.
+
+                Used as the ``conn_factory`` argument to ``upsert_with_retry``.
+                ``upsert_with_retry`` is responsible for closing the stale
+                connection before calling this method; we only need to open a
+                fresh one here.  The returned connection is assigned back to
+                ``self._conn`` by ``process_element`` via the return value of
+                ``upsert_with_retry``.
+                """
+                import psycopg2  # lazy — already imported in open(); safe to re-import
+
+                new_conn = psycopg2.connect(config.pg_dsn)
+                new_conn.autocommit = False
+                return new_conn
 
             def process_element(self, value: Any, ctx: Any) -> None:
                 # value = metrics Row(athlete_id, metric_date, acute_load,
                 #   chronic_load_28d, chronic_load_42d, acute_chronic_ratio,
                 #   deload_flag).
-                import time as _time
+                import sys as _sys
 
-                from storage.postgres.sink import execute_upsert
+                from storage.postgres.sink import upsert_with_retry
 
                 record = {
                     "athlete_id": value[IDX_ACR_ATHLETE_ID],
@@ -972,34 +994,35 @@ CREATE TABLE canonical_training_event_source (
                     "acute_chronic_ratio": value[IDX_ACR],
                     "deload_flag": value[IDX_METRICS_DELOAD_FLAG],
                 }
-                last_exc: "BaseException | None" = None
-                for attempt in range(self._MAX_RETRIES):
-                    try:
-                        cur = self._conn.cursor()
-                        execute_upsert(cur, record)
-                        self._conn.commit()
-                        cur.close()
-                        # Yield the athlete_id as a routing token so the output
-                        # stream is non-empty and .print() is not pruned.
-                        yield str(value[IDX_ACR_ATHLETE_ID])
-                        return
-                    except Exception as exc:  # noqa: BLE001
-                        last_exc = exc
-                        try:
-                            self._conn.rollback()
-                        except Exception:  # noqa: BLE001
-                            pass
-                        if attempt < self._MAX_RETRIES - 1:
-                            _time.sleep(self._BASE_BACKOFF_S * (2 ** attempt))
-
-                import sys as _sys
-
-                print(
-                    f"[PgUpsertFn] WARN: UPSERT failed after {self._MAX_RETRIES} "
-                    f"retries for record athlete_id={record.get('athlete_id')!r}. "
-                    f"Last error: {last_exc!r}",
-                    file=_sys.stderr,
-                )
+                try:
+                    # upsert_with_retry handles exponential back-off, dead-
+                    # connection detection, and reconnect.  It returns the
+                    # (possibly new) connection; we update self._conn so that
+                    # the next process_element() call uses the fresh one.
+                    self._conn = upsert_with_retry(
+                        record=record,
+                        conn=self._conn,
+                        conn_factory=self._reconnect,
+                        max_retries=self._MAX_RETRIES,
+                        base_backoff_s=self._BASE_BACKOFF_S,
+                    )
+                    # Yield the athlete_id as a routing token so the output
+                    # stream is non-empty and .print() is not pruned.
+                    yield str(value[IDX_ACR_ATHLETE_ID])
+                except Exception as last_exc:  # noqa: BLE001
+                    # Increment the Flink dropped-record counter before logging.
+                    # This counter is visible in the Flink UI / metrics reporter
+                    # and must be alerted on (any non-zero rate = data loss risk).
+                    self._counter_dropped.inc()
+                    print(
+                        f"[PgUpsertFn] WARN: UPSERT failed after {self._MAX_RETRIES} "
+                        f"retries for record athlete_id={record.get('athlete_id')!r}. "
+                        f"Last error: {last_exc!r}",
+                        file=_sys.stderr,
+                    )
+                    # Pragmatic drop: PG metrics are re-derivable from Kafka +
+                    # Iceberg on the next checkpoint replay.  Counter above ensures
+                    # visibility.  Do NOT re-raise — that would crash the operator.
 
             def close(self) -> None:
                 try:
@@ -1018,14 +1041,71 @@ CREATE TABLE canonical_training_event_source (
         # Tapped off the deduped stream (post-event_id dedup, pre-aggregation).
         _canon_fields_ice = canonical_field_names
 
-        class _IcebergAppendFn(ProcessFunction):  # type: ignore[misc]
-            """Per-element Iceberg append ProcessFunction for canonical events (PR5).
+        # Number of records accumulated in the per-element buffer before a
+        # size-triggered flush.  This prevents one Parquet file per event.
+        # The production-correct flush boundary is the Flink checkpoint; see
+        # snapshot_state() below (CheckpointedFunction extension point).
+        _FLUSH_SIZE = 500
 
-            Appends each canonical Row to the Iceberg training_event table
-            immediately inside process_element().  Per-element appends avoid
-            dependency on close() being called in the minicluster.
+        # CheckpointedFunction wiring (pyflink 1.19 limitation documented):
+        # ---------------------------------------------------------------
+        # In pyflink 1.19, CheckpointedFunction is a Java-level interface
+        # (org.apache.flink.api.common.functions.CheckpointedFunction) that
+        # Python UDFs CANNOT inherit from.  The pyflink Python runtime
+        # (fn_execution/datastream/process/operations.py) only invokes
+        # open(), close(), process_element(), and on_timer() on Python
+        # function objects; it does NOT call snapshot_state() or
+        # initialize_state().  There is no pyflink.datastream.functions.
+        # CheckpointedFunction class available for import.
+        #
+        # Consequence: the snapshot_state() / initialize_state() methods
+        # below are DEFINED but will NOT be called by the Flink checkpoint
+        # coordinator in pyflink 1.19.  The checkpoint-aligned flush is
+        # therefore not wired at the Python level.
+        #
+        # Active flush paths (belt-and-suspenders):
+        #   1. Size-threshold flush at _FLUSH_SIZE records (process_element).
+        #   2. close() flush on operator teardown (catches normal shutdown
+        #      and Flink-triggered close after bounded execution).
+        #
+        # The snapshot_state() and initialize_state() methods are kept so
+        # that:
+        #   a) a future pyflink version that exposes CheckpointedFunction as
+        #      a Python base class can inherit from it without code changes
+        #      (just add CheckpointedFunction to the MRO);
+        #   b) integration tests or a custom Beam/Flink runner that
+        #      discovers these methods via hasattr() can call them.
+        #
+        # At-least-once correctness (pyflink 1.19): duplicates from replay
+        # are bounded by the 7d dedup TTL on the upstream deduped stream
+        # (obs #48 OQ-1).  Iceberg is append-only, so re-appended records
+        # from a replay window are duplicates within the dedup bound — not
+        # corruption.  Parquet file boundaries align with close() flushes
+        # (normal teardown) and size-threshold flushes, not with checkpoint
+        # barriers (pyflink 1.19 limitation).
+        #
+        # Upgrade path: when pyflink exposes CheckpointedFunction for Python
+        # UDFs, add it to the class bases and remove this comment block.
+        class _IcebergAppendFn(ProcessFunction):  # type: ignore[misc]
+            """Checkpoint-batched Iceberg append ProcessFunction for canonical events (PR5).
+
+            Buffers records in memory and flushes to Iceberg in batches:
+              - On size threshold (_FLUSH_SIZE elements): immediate flush.
+              - On Flink checkpoint (snapshot_state): flush remaining buffer.
+                This is the production-correct intent; however in pyflink 1.19
+                snapshot_state() is NOT called by the checkpoint coordinator
+                on Python UDFs — see the module-level comment above this
+                class.  The size-threshold and close() flushes are the active
+                paths in pyflink 1.19.
+              - On close(): flush any remaining buffered records.
+
             AT_LEAST_ONCE + append-only; rare duplicates bounded by 7d dedup
             TTL on the upstream deduped stream (obs #48 OQ-1).
+
+            Flush failure: increments the iceberg_append_failed Flink counter
+            and re-raises so Flink can replay from the last checkpoint.  The
+            analytical store is the source of truth; swallowing append errors
+            would cause silent data loss.
             """
 
             def open(self, runtime_context: Any) -> None:
@@ -1046,28 +1126,93 @@ CREATE TABLE canonical_training_event_source (
                     },
                 )
                 self._table = create_training_event_table(catalog)
+                self._buffer: list[dict] = []
+                self._runtime_context = runtime_context
+                self._counter_failed = runtime_context.get_metrics_group().counter(
+                    COUNTER_ICEBERG_APPEND_FAILED
+                )
+
+            def _flush(self) -> None:
+                """Flush the in-memory buffer to Iceberg and clear it.
+
+                On failure: increments the failed counter and re-raises so
+                Flink triggers a task restart and replays from the checkpoint.
+                """
+                if not self._buffer:
+                    return
+                from storage.iceberg.sink import append_events
+
+                try:
+                    append_events(self._table, self._buffer)
+                    self._buffer.clear()
+                except Exception as exc:
+                    import sys as _sys
+
+                    self._counter_failed.inc()
+                    print(
+                        f"[IcebergAppendFn] ERROR: batch append failed for "
+                        f"{len(self._buffer)} records: {exc!r}",
+                        file=_sys.stderr,
+                    )
+                    raise  # re-raise: Flink will replay from last checkpoint
 
             def process_element(self, value: Any, ctx: Any) -> None:
                 # value = canonical Row; field order matches canonical_field_names.
-                from storage.iceberg.sink import append_events
-
                 record = {
                     name: value[i]
                     for i, name in enumerate(_canon_fields_ice)
                 }
-                try:
-                    append_events(self._table, [record])
-                    # Yield event_id token so the output stream is non-empty
-                    # and .print() is not pruned by the plan optimizer.
-                    yield str(value[0])  # event_id at index 0
-                except Exception as exc:  # noqa: BLE001
-                    import sys as _sys
+                self._buffer.append(record)
+                if len(self._buffer) >= _FLUSH_SIZE:
+                    self._flush()
+                # Yield event_id token so the output stream is non-empty
+                # and .print() is not pruned by the plan optimizer.
+                yield str(value[0])  # event_id at index 0
 
-                    print(
-                        f"[IcebergAppendFn] WARN: append failed for "
-                        f"event_id={value[0]!r}: {exc!r}",
-                        file=_sys.stderr,
-                    )
+            def snapshot_state(self, context: Any) -> None:
+                """Flush buffer on checkpoint barrier (CheckpointedFunction intent).
+
+                This is the checkpoint-aligned flush path: flushing here ensures
+                every record that passed process_element() before the checkpoint
+                barrier is durably written to Iceberg before the checkpoint
+                completes, bounding the replay window to at most _FLUSH_SIZE-1
+                un-flushed records.
+
+                PYFLINK 1.19 LIMITATION: this method is defined but NOT called
+                by the Flink checkpoint coordinator in pyflink 1.19.  The Python
+                runtime only invokes open/close/process_element on UDFs.  See
+                the comment block above this class for full context and the
+                upgrade path.
+
+                When pyflink exposes CheckpointedFunction for Python UDFs, add
+                CheckpointedFunction to the class MRO and this method will be
+                called automatically on every checkpoint barrier.
+                """
+                self._flush()
+
+            def initialize_state(self, context: Any) -> None:
+                """No operator state to restore (buffer is intentionally transient).
+
+                At-least-once semantics: the buffer is an in-memory accumulator
+                only.  On job restart Flink replays from the last checkpoint
+                offset; any un-flushed records in the buffer at failure time are
+                re-delivered by the Kafka source.  We do NOT persist/restore the
+                buffer because:
+                  - Iceberg is append-only: re-appending the same records is
+                    safe (idempotent within the 7d upstream dedup window).
+                  - Restoring the buffer would require durable operator state,
+                    which adds RocksDB/HDFS cost for data already in Kafka.
+
+                This is the correct at-least-once tradeoff (obs #48 OQ-1).
+                """
+
+            def close(self) -> None:
+                """Flush any remaining buffered records on operator teardown."""
+                try:
+                    self._flush()
+                except Exception:  # noqa: BLE001
+                    pass  # already counted and logged in _flush(); swallow here
+                          # so close() itself does not raise (Flink teardown path)
 
         # process() returns a DataStream[STRING] — sink it with print() to
         # keep the operator in the job graph (see PG sink note above).

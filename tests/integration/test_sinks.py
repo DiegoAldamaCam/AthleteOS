@@ -50,7 +50,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -72,32 +72,10 @@ if importlib.util.find_spec("pyflink") is None:
 # ---------------------------------------------------------------------------
 
 
-def _patch_pyarrow_file_io() -> None:
-    """Fix PyArrowFileIO.parse_location for Windows bare-drive paths (C:/...).
+from tests._pyarrow_compat import patch_pyarrow_file_io as _patch_pyarrow_file_io
 
-    The Flink minicluster runs Python UDFs in-process; the shim applied here
-    is therefore active when _IcebergAppendFn.open() runs inside run().
-    No-op on Linux (guarded by sys.platform check).
-    """
-    if sys.platform != "win32":
-        return
-    from pyiceberg.io.pyarrow import PyArrowFileIO
-
-    _orig = PyArrowFileIO.parse_location
-
-    def _patched(location: str):
-        from urllib.parse import urlparse as _up
-
-        if len(location) >= 2 and location[1] == ":":
-            return "file", "", location.replace("\\", "/")
-        uri = _up(location)
-        if uri.scheme == "file" and len(uri.path) >= 3 and uri.path[2] == ":":
-            return "file", uri.netloc, uri.path[1:]
-        return _orig(location)
-
-    PyArrowFileIO.parse_location = staticmethod(_patched)
-
-
+# Apply the shim before any pyiceberg import (Flink minicluster runs UDFs
+# in-process, so the patch must be active when _IcebergAppendFn.open() runs).
 _patch_pyarrow_file_io()
 
 # ---------------------------------------------------------------------------
@@ -473,8 +451,6 @@ def test_pg_and_iceberg_sinks(
         (_ATHLETE_ID,),
     )
 
-    import datetime
-
     # We produced events for days 1-4; expect at least day 4 in PG.
     # The window may emit partial results for earlier days too; we focus on day
     # 4 (the final state per the bounded source) and day 1 (deload=0 baseline).
@@ -484,19 +460,19 @@ def test_pg_and_iceberg_sinks(
     )
 
     # Build a dict keyed by metric_date (DATE object)
-    by_date: dict[datetime.date, tuple] = {}
+    by_date: dict[date, tuple] = {}
     for row in pg_rows:
         # row = (athlete_id, metric_date, acute_load, chronic_28d, chronic_42d, acr, deload)
         by_date[row[1]] = row
 
     # Expected day-1 date
-    day1_date = datetime.date(2024, 2, 1)
-    day4_date = datetime.date(2024, 2, 4)
+    day1_date = date(2024, 2, 1)
+    day4_date = date(2024, 2, 4)
 
     # A1: metric_date is a DATE (not an int / epoch) — testcontainers returns
     # Python datetime.date from psycopg2 for DATE columns.
     for md in by_date:
-        assert isinstance(md, datetime.date), (
+        assert isinstance(md, date), (
             f"metric_date must be DATE, got {type(md)!r}: {md!r}"
         )
 
@@ -561,10 +537,22 @@ def test_pg_and_iceberg_sinks(
     assert len(iceberg_rows) > 0, (
         f"Expected Iceberg Parquet files in {iceberg_warehouse!r}, got none."
     )
-    assert len(iceberg_rows) == _N_DAYS, (
-        f"Expected {_N_DAYS} Iceberg rows (one per deduplicated event), "
-        f"got {len(iceberg_rows)}. "
-        f"Event IDs found: {[r.get('event_id') for r in iceberg_rows]}"
+    # Primary assertion: every expected event_id is present (set equality).
+    # AT_LEAST_ONCE delivery means the count may be >= _N_DAYS (rare replays
+    # could produce duplicate Parquet rows); the event_id set must be exact.
+    expected_event_ids = {f"evt-s1-day-{d}" for d in range(1, _N_DAYS + 1)}
+    actual_event_ids = {
+        r["event_id"] if isinstance(r["event_id"], str) else r["event_id"].decode()
+        for r in iceberg_rows
+    }
+    assert actual_event_ids == expected_event_ids, (
+        f"Iceberg event_id set mismatch.\n"
+        f"  Expected: {sorted(expected_event_ids)}\n"
+        f"  Got:      {sorted(actual_event_ids)}"
+    )
+    # Secondary assertion: exact count under AT_LEAST_ONCE dedup (allow >=).
+    assert len(iceberg_rows) >= _N_DAYS, (
+        f"Expected at least {_N_DAYS} Iceberg rows, got {len(iceberg_rows)}."
     )
 
     # C2: All rows have the correct athlete_id
@@ -613,11 +601,14 @@ def test_pg_and_iceberg_sinks(
         f"Unexpected pg_missing parity mismatches: {pg_missing}\n"
         f"Every Iceberg event day must have a matching PG metric row."
     )
-    # Log iceberg_missing count (expected; sliding window emits metrics for
-    # days beyond the raw event dates — grain difference, not a bug).
+    # iceberg_missing is expected and > 0: the 42d sliding window emits PG
+    # metric rows for days beyond the raw event days (e.g. Feb 5 through ~Mar 17
+    # for 4 Feb events), but those future days have no Iceberg raw events.
+    # For 4 events and a 42d window, the sliding window produces metric rows for
+    # many dates that have no corresponding Iceberg event → iceberg_missing > 0.
     iceberg_missing_count = len([m for m in all_mismatches if m["side"] == "iceberg_missing"])
-    # iceberg_missing is > 0 when PG has derived metric rows for days where no
-    # raw event was produced; this is structurally correct for a 42d sliding
-    # window with only N_DAYS events.  We assert it is non-negative (always
-    # true) and document the expected magnitude.
-    assert iceberg_missing_count >= 0, "iceberg_missing count must be non-negative"
+    assert iceberg_missing_count > 0, (
+        f"Expected iceberg_missing > 0 (42d sliding window produces PG metrics "
+        f"for days beyond the {_N_DAYS} raw event days), got {iceberg_missing_count}. "
+        f"This may indicate the window did not emit future-day metrics."
+    )

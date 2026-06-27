@@ -34,39 +34,9 @@ import pytest
 # the affected code paths).
 # ---------------------------------------------------------------------------
 
-
-def _patch_pyarrow_file_io() -> None:
-    """Fix PyArrowFileIO.parse_location for Windows bare-drive paths (C:/...).
-
-    urlparse('C:/path') treats 'c' as the URI scheme, which
-    PyArrowFileIO's fs_by_scheme() rejects with "Unrecognized filesystem type".
-    This patch normalises such paths so PyArrowFileIO hands them to the local
-    filesystem correctly.  On Linux the original function is used as-is.
-
-    This shim is still needed because SqlCatalog uses PyArrowFileIO when
-    creating/registering the Iceberg table on Windows — even though read-back
-    now goes through pyarrow.parquet directly.
-    """
-    if sys.platform != "win32":
-        return
-    from pyiceberg.io.pyarrow import PyArrowFileIO
-
-    _orig = PyArrowFileIO.parse_location
-
-    def _patched(location: str):
-        from urllib.parse import urlparse as _up
-
-        # Bare Windows path: C:\... or C:/...
-        if len(location) >= 2 and location[1] == ":":
-            return "file", "", location.replace("\\", "/")
-        uri = _up(location)
-        # file:///C:/... → path is /C:/... → strip leading slash
-        if uri.scheme == "file" and len(uri.path) >= 3 and uri.path[2] == ":":
-            return "file", uri.netloc, uri.path[1:]
-        return _orig(location)
-
-    PyArrowFileIO.parse_location = staticmethod(_patched)
-
+# Shared Windows PyArrowFileIO shim — extracted from the three test files
+# that previously each contained a verbatim copy.
+from tests._pyarrow_compat import patch_pyarrow_file_io as _patch_pyarrow_file_io
 
 # Apply the Windows filesystem-path shim once at module import.
 # This fixes PyArrowFileIO on Windows so SqlCatalog can create tables in
