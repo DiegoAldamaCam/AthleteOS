@@ -39,7 +39,15 @@ export default function DashboardPage() {
   if (dlq.isLoading) {
     dlqPanel = <Loading />
   } else if (dlq.isError || !dlq.data) {
-    dlqPanel = <ErrorAlert message="Failed to load pipeline health" />
+    dlqPanel = (
+      <ErrorAlert
+        message={
+          dlq.error instanceof Error
+            ? dlq.error.message
+            : 'Failed to load pipeline health'
+        }
+      />
+    )
   } else {
     dlqPanel = <PipelineHealthPanel data={dlq.data} />
   }
