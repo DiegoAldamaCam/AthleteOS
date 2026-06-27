@@ -136,15 +136,43 @@ def seeded_db(pg_conn) -> dict:
 
 @pytest.fixture(scope="module")
 def api_client(pg_dsn, seeded_db):
-    """TestClient wrapping the FastAPI app, with DATABASE_URL injected."""
+    """TestClient wrapping the FastAPI app, with DATABASE_URL injected.
+
+    Reloads api.config / api.main so the app's cached Settings pick up THIS
+    module's DATABASE_URL even when another integration module (e.g. test_api_dlq)
+    ran earlier in the same session and left a stale config module cached.
+    Restores the prior env on teardown to avoid leaking into later modules.
+    """
+    _env_keys = ("DATABASE_URL", "CORS_ORIGINS", "KAFKA_BOOTSTRAP_SERVERS")
+    _env_backup = {k: os.environ.get(k) for k in _env_keys}
+
     os.environ["DATABASE_URL"] = pg_dsn
     os.environ["CORS_ORIGINS"] = "http://localhost:5173"
     os.environ["KAFKA_BOOTSTRAP_SERVERS"] = "localhost:9092"
+
+    import importlib
+    try:
+        import api.config as _cfg
+        importlib.reload(_cfg)
+        import api.db as _db
+        importlib.reload(_db)
+        import api.routers.metrics as _rm
+        importlib.reload(_rm)
+        import api.main as _main
+        importlib.reload(_main)
+    except (ImportError, AttributeError):
+        pass
 
     from api.main import app  # noqa: PLC0415
 
     with TestClient(app) as client:
         yield client
+
+    for key, value in _env_backup.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 # ---------------------------------------------------------------------------

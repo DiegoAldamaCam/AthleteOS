@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://athleteos:athleteos@localhost:5432/athleteos"
     kafka_bootstrap_servers: str = "localhost:9092"
     cors_origins: str = "http://localhost:5173"
+    kafka_admin_request_timeout: float = 5.0  # seconds; env var: KAFKA_ADMIN_REQUEST_TIMEOUT
 
     @property
     def cors_origins_list(self) -> list[str]:

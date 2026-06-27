@@ -3,6 +3,7 @@
 Exposes:
   GET /health                    — liveness probe
   GET /athletes/{id}/metrics     — metrics date-range time-series (Domain A)
+  GET /pipeline/dlq-depth        — DLQ topic depth health panel (Domain B)
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.config import settings
-from api.routers import metrics
+from api.routers import metrics, pipeline
 
 app = FastAPI(
     title="AthleteOS API",
@@ -34,6 +35,7 @@ app.add_middleware(
 # Routers
 # ---------------------------------------------------------------------------
 app.include_router(metrics.router)
+app.include_router(pipeline.router)
 
 
 # ---------------------------------------------------------------------------
