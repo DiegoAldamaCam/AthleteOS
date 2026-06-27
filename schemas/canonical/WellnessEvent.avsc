@@ -5,7 +5,7 @@
     {"name": "source", "type": "string"},
     {"name": "schema_version", "type": "int"},
     {"name": "athlete_id", "type": "string"},
-    {"name": "event_type", "type": {"type": "enum", "name": "WellnessEventType", "symbols": ["RECOVERY_SNAPSHOT", "NUTRITION_DAILY", "WELLNESS_DAILY"]}},
+    {"name": "event_type", "type": "string"},
     {"name": "sleep_hours", "type": ["null", "float"], "default": null},
     {"name": "resting_hr", "type": ["null", "int"], "default": null},
     {"name": "hrv", "type": ["null", "float"], "default": null},
