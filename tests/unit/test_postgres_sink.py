@@ -176,16 +176,17 @@ class TestBuildUpsert:
             for p in params_list
         ), "acute_chronic_ratio missing from params"
         assert 1 in params_list, "deload_flag missing from params"
-        # Positions 7-9: new metrics-v2 fields
-        assert any(
-            isinstance(p, float) and math.isclose(p, 28.0)
-            for p in params_list
-        ), "fatigue_score missing from params"
-        assert any(
-            isinstance(p, float) and math.isclose(p, 72.5)
-            for p in params_list
-        ), "readiness_score missing from params"
-        assert '["monitor"]' in params_list, "coaching_flags JSON string missing from params"
+        # FIX 6c: position-pinned assertions for v2 fields (match nan-test style).
+        # params[7] = fatigue_score, params[8] = readiness_score, params[9] = coaching_flags
+        assert isinstance(params[7], float) and math.isclose(params[7], 28.0), (
+            f"fatigue_score must be at params[7]=28.0, got {params[7]!r}"
+        )
+        assert isinstance(params[8], float) and math.isclose(params[8], 72.5), (
+            f"readiness_score must be at params[8]=72.5, got {params[8]!r}"
+        )
+        assert params[9] == '["monitor"]', (
+            f"coaching_flags must be at params[9]='[\"monitor\"]', got {params[9]!r}"
+        )
         # Total must be exactly 10
         assert len(params_list) == 10, f"Expected 10 params, got {len(params_list)}"
 

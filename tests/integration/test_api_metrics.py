@@ -474,3 +474,44 @@ def test_coaching_flags_null_db_returns_null_in_response(api_client, seeded_db):
     assert row["coaching_flags"] is None, (
         f"coaching_flags=NULL in DB must be null in JSON response, got {row['coaching_flags']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# FIX 1: Malformed coaching_flags TEXT must yield coaching_flags=None (no 500)
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_coaching_flags_text_does_not_500(api_client, pg_conn, seeded_db):
+    """FIX 1: A corrupt/non-JSON coaching_flags TEXT value must return coaching_flags=None.
+
+    A single bad value must NOT crash the entire endpoint with HTTP 500.
+    Graceful degradation: coaching_flags=None in the response row.
+    """
+    # Seed a row with a deliberately malformed coaching_flags TEXT value.
+    corrupt_date = date(2025, 3, 15)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO athlete_metrics
+                (athlete_id, metric_date, acute_load, chronic_load_28d, chronic_load_42d,
+                 acute_chronic_ratio, deload_flag,
+                 fatigue_score, readiness_score, coaching_flags)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (athlete_id, metric_date) DO NOTHING
+            """,
+            ("A8", corrupt_date, 100.0, 90.0, 85.0, 1.1, 0, 20.0, 65.0, "NOT_VALID_JSON{{{"),
+        )
+
+    date_str = corrupt_date.isoformat()
+    resp = api_client.get(f"/athletes/A8/metrics?from={date_str}&to={date_str}")
+    # Must NOT be 500
+    assert resp.status_code == 200, (
+        f"Malformed coaching_flags must not crash the endpoint (500); got {resp.status_code}: {resp.text}"
+    )
+    data = resp.json()
+    assert len(data) == 1, f"Expected 1 row, got {len(data)}: {data}"
+    row = data[0]
+    assert "coaching_flags" in row, "coaching_flags field must be present in response"
+    assert row["coaching_flags"] is None, (
+        f"Corrupt coaching_flags TEXT must degrade gracefully to null, got {row['coaching_flags']!r}"
+    )

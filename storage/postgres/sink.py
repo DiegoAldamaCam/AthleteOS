@@ -110,12 +110,15 @@ def epoch_ms_to_date(epoch_ms: int) -> datetime.date:
 # ---------------------------------------------------------------------------
 
 
-def _sanitize_acr(value: Any) -> "float | None":
+def _sanitize_float(value: Any) -> "float | None":
     """Return None for None or NaN; otherwise return the float value.
 
     Both None (chronic_load_28d == 0 sentinel) and float('nan') (IEEE-754
     wire encoding from the Flink operator) map to SQL NULL as per the
     approved PR5 decision.
+
+    FIX 4: Renamed from _sanitize_acr — the helper is reused for
+    fatigue_score and readiness_score in addition to acute_chronic_ratio.
     """
     if value is None:
         return None
@@ -144,9 +147,9 @@ def build_upsert(record: dict) -> tuple[str, tuple]:
         coaching_flags is passed through as a JSON string; empty list -> "[]".
     """
     metric_date_val: datetime.date = epoch_ms_to_date(int(record["metric_date"]))
-    acr: "float | None" = _sanitize_acr(record.get("acute_chronic_ratio"))
-    fatigue: "float | None" = _sanitize_acr(record.get("fatigue_score"))
-    readiness: "float | None" = _sanitize_acr(record.get("readiness_score"))
+    acr: "float | None" = _sanitize_float(record.get("acute_chronic_ratio"))
+    fatigue: "float | None" = _sanitize_float(record.get("fatigue_score"))
+    readiness: "float | None" = _sanitize_float(record.get("readiness_score"))
     # coaching_flags is a JSON string from the Row (json.dumps in process_element);
     # it is never None in normal flow — the Row always carries "[]" at minimum.
     coaching_flags_val: str = str(record.get("coaching_flags") or "[]")

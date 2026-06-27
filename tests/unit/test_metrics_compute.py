@@ -607,6 +607,69 @@ class TestMetricsRowToJson:
         assert parsed["deload_flag"] == 1
         assert parsed["metric_date"] == 1_000_000_000_000
 
+    # FIX 3: v2 fields (fatigue_score, readiness_score, coaching_flags) in JSON output.
+    def test_v2_fields_included_in_json(self):
+        """FIX 3: metrics_row_to_json must include fatigue_score, readiness_score,
+        coaching_flags in the JSON output (Kafka staging topic matches PG schema)."""
+        result = metrics_row_to_json(
+            athlete_id="ath-v2",
+            metric_date=1_700_000_000_000,
+            acute_load_val=200.0,
+            chronic_load_28d_val=100.0,
+            chronic_load_42d_val=100.0,
+            acr_val=2.0,
+            deload_flag=1,
+            fatigue_score_val=40.0,
+            readiness_score_val=30.0,
+            coaching_flags_val=["deload", "monitor"],
+        )
+        parsed = json.loads(result)
+        assert "fatigue_score" in parsed, "fatigue_score missing from JSON output"
+        assert "readiness_score" in parsed, "readiness_score missing from JSON output"
+        assert "coaching_flags" in parsed, "coaching_flags missing from JSON output"
+        assert parsed["fatigue_score"] == pytest.approx(40.0)
+        assert parsed["readiness_score"] == pytest.approx(30.0)
+        assert parsed["coaching_flags"] == ["deload", "monitor"]
+
+    def test_v2_nan_fatigue_score_becomes_null(self):
+        """FIX 3: NaN fatigue_score must serialize as null (not raise ValueError)."""
+        result = metrics_row_to_json(
+            athlete_id="ath-v2b",
+            metric_date=1_700_000_000_000,
+            acute_load_val=100.0,
+            chronic_load_28d_val=100.0,
+            chronic_load_42d_val=100.0,
+            acr_val=1.0,
+            deload_flag=0,
+            fatigue_score_val=float("nan"),
+            readiness_score_val=None,
+            coaching_flags_val=[],
+        )
+        parsed = json.loads(result)
+        assert parsed["fatigue_score"] is None, (
+            f"NaN fatigue_score must become null, got {parsed['fatigue_score']!r}"
+        )
+        assert parsed["readiness_score"] is None
+        assert parsed["coaching_flags"] == []
+
+    def test_v2_none_scores_become_null(self):
+        """FIX 3: None fatigue/readiness scores serialize as null."""
+        result = metrics_row_to_json(
+            athlete_id="ath-v2c",
+            metric_date=1_700_000_000_000,
+            acute_load_val=0.0,
+            chronic_load_28d_val=0.0,
+            chronic_load_42d_val=0.0,
+            acr_val=None,
+            deload_flag=0,
+            fatigue_score_val=None,
+            readiness_score_val=None,
+            coaching_flags_val=[],
+        )
+        parsed = json.loads(result)
+        assert parsed["fatigue_score"] is None
+        assert parsed["readiness_score"] is None
+
 
 # ---------------------------------------------------------------------------
 # compute_fatigue_score (metrics-v2, Scenarios 1-4)
@@ -640,6 +703,17 @@ class TestComputeFatigueScore:
         # ratio exactly 5 (at ceiling): 250/50 -> 5*20=100.0 (boundary, not exceeded)
         assert compute_fatigue_score(250.0, 50.0) == pytest.approx(100.0)
 
+    # FIX 2: NaN guard — NaN inputs must return None, not propagate NaN.
+    def test_chronic_load_42d_nan_returns_none(self):
+        # NaN chronic_load_42d must return None (not nan) — FIX 2.
+        result = compute_fatigue_score(100.0, float("nan"))
+        assert result is None, f"Expected None for NaN chronic_load_42d, got {result!r}"
+
+    def test_acute_load_nan_returns_none(self):
+        # NaN acute_load must return None (not nan) — FIX 2.
+        result = compute_fatigue_score(float("nan"), 50.0)
+        assert result is None, f"Expected None for NaN acute_load, got {result!r}"
+
 
 # ---------------------------------------------------------------------------
 # compute_readiness_score (metrics-v2, Scenarios 5-11)
@@ -670,13 +744,15 @@ class TestComputeReadinessScore:
         assert compute_readiness_score(None, 50.0) is None
 
     def test_scenario_9_readiness_never_exceeds_80(self):
-        # Sc 9 invariant: ACR sweep 0..3 step 0.01 — no value > 80.0
+        # Sc 9 invariant: ACR sweep 0..3 step 0.01 — no value > 80.0 AND no value < 0.0
         import math
         for acr_i in range(0, 301):
             acr = acr_i / 100.0
             result = compute_readiness_score(acr, 100.0)
             assert result is not None
             assert result <= 80.0, f"readiness_score exceeded 80.0 at acr={acr}: {result}"
+            # FIX 6a: lower bound — readiness score must never be negative
+            assert result >= 0.0, f"readiness_score below 0.0 at acr={acr}: {result}"
 
     def test_scenario_10_high_load_zone_descent(self):
         # Sc 10: acr=2.0, chronic_28d=50
@@ -695,6 +771,17 @@ class TestComputeReadinessScore:
         # acr=3.0 (way into danger zone): max(0, 60-((3.0-1.3)/0.7)*60)=max(0,60-145.7)<0 -> 0.0
         result = compute_readiness_score(3.0, 50.0)
         assert result == pytest.approx(0.0)
+
+    # FIX 2: NaN guard — NaN inputs must return None, not propagate NaN.
+    def test_acr_nan_returns_none(self):
+        # NaN acr must return None — FIX 2.
+        result = compute_readiness_score(float("nan"), 100.0)
+        assert result is None, f"Expected None for NaN acr, got {result!r}"
+
+    def test_chronic_load_28d_nan_returns_none(self):
+        # NaN chronic_load_28d must return None — FIX 2.
+        result = compute_readiness_score(1.0, float("nan"))
+        assert result is None, f"Expected None for NaN chronic_load_28d, got {result!r}"
 
 
 # ---------------------------------------------------------------------------

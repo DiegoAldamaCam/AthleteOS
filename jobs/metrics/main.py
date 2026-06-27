@@ -899,6 +899,7 @@ CREATE TABLE canonical_training_event_source (
         # NF-2: allow_nan=False inside metrics_row_to_json ensures non-finite
         # load fields raise ValueError (fail-fast to DLQ) instead of emitting
         # the non-standard `NaN`/`Infinity` tokens that violate RFC 8259.
+        # FIX 3: pass the 3 v2 fields (positions 7-9) so Kafka JSON matches PG schema.
         return metrics_row_to_json(
             athlete_id=row[IDX_ACR_ATHLETE_ID],
             metric_date=row[IDX_ACR_METRIC_DATE],
@@ -907,6 +908,11 @@ CREATE TABLE canonical_training_event_source (
             chronic_load_42d_val=row[IDX_ACR_CHRONIC_42D],
             acr_val=row[IDX_ACR],
             deload_flag=row[IDX_METRICS_DELOAD_FLAG],
+            fatigue_score_val=row[IDX_METRICS_FATIGUE],
+            readiness_score_val=row[IDX_METRICS_READINESS],
+            coaching_flags_val=json.loads(row[IDX_METRICS_COACHING_FLAGS])
+            if row[IDX_METRICS_COACHING_FLAGS] is not None
+            else [],
         )
 
     metrics_json_stream = metrics_stream.map(

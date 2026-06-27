@@ -124,9 +124,13 @@ def get_athlete_metrics(
     # Deserialize coaching_flags TEXT -> list[str] before constructing MetricRow.
     # Scenario 17: TEXT '[\"deload\"]' -> list[str] ["deload"].
     # NULL -> None (passthrough); "[]" -> [].
+    # FIX 1: Guard against corrupt/non-JSON TEXT values (graceful degradation to None).
     for row in rows:
         raw_flags = row.get("coaching_flags")
         if raw_flags is not None:
-            row["coaching_flags"] = json.loads(raw_flags)
+            try:
+                row["coaching_flags"] = json.loads(raw_flags)
+            except json.JSONDecodeError:
+                row["coaching_flags"] = None
 
     return [MetricRow(**row) for row in rows]

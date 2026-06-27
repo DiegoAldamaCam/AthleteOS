@@ -518,8 +518,9 @@ def test_pg_and_iceberg_sinks(
         assert isinstance(row[0], str), f"athlete_id must be str at {md}"
         # Scenario 19 (atomic 10-field write): all 10 columns readable.
         # fatigue/readiness: float or None — both valid (NULL for zero-baseline rows).
+        # FIX 6b: isinstance without float() cast — float(x) is always a float (tautology).
         if fatigue_val is not None:
-            assert isinstance(float(fatigue_val), float), (
+            assert isinstance(fatigue_val, (float, int)), (
                 f"fatigue_score must be float or NULL, got {type(fatigue_val)!r} at {md}"
             )
         # Scenario 21 (readiness never > 80): honesty cap enforced end-to-end.

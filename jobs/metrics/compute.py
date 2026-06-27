@@ -86,10 +86,16 @@ def compute_fatigue_score(acute_load: float, chronic_load_42d: float) -> "float 
         * FATIGUE_SCALE
 
     Returns:
-        float in [0, 100], or None when chronic_load_42d == 0 (no baseline yet).
+        float in [0, 100], or None when chronic_load_42d == 0 (no baseline yet),
+        or None when either input is NaN (FIX 2 — NaN must not propagate as nan).
 
     Spec: Scenarios 1-4.
     """
+    # FIX 2: Guard NaN inputs — NaN propagates silently through arithmetic.
+    if isinstance(chronic_load_42d, float) and math.isnan(chronic_load_42d):
+        return None
+    if isinstance(acute_load, float) and math.isnan(acute_load):
+        return None
     if chronic_load_42d == 0:
         return None
     ratio = acute_load / max(chronic_load_42d, 1.0)
@@ -110,10 +116,16 @@ def compute_readiness_score(acr: "float | None", chronic_load_28d: float) -> "fl
     API never claims an athlete is fully "ready" (Scenario 9 invariant).
 
     Returns:
-        float in [0, 80], or None when acr is None or chronic_load_28d == 0.
+        float in [0, 80], or None when acr is None or chronic_load_28d == 0,
+        or None when either input is NaN (FIX 2 — NaN must not propagate as nan).
 
     Spec: Scenarios 5-11.
     """
+    # FIX 2: Guard NaN inputs before the None/zero checks.
+    if isinstance(acr, float) and math.isnan(acr):
+        return None
+    if isinstance(chronic_load_28d, float) and math.isnan(chronic_load_28d):
+        return None
     if chronic_load_28d == 0 or acr is None:
         return None
     if acr <= 0.8:
@@ -391,6 +403,9 @@ def metrics_row_to_json(
     chronic_load_42d_val: float,
     acr_val: "float | None",
     deload_flag: int,
+    fatigue_score_val: "float | None" = None,
+    readiness_score_val: "float | None" = None,
+    coaching_flags_val: "list[str] | None" = None,
 ) -> str:
     """Serialize one metrics row to a RFC 8259-compliant JSON string.
 
@@ -400,12 +415,25 @@ def metrics_row_to_json(
 
     ACR is allowed to be None (chronic==0) or float('nan') (IEEE-754 sentinel
     from the upstream guard); both are serialized as JSON null.
+
+    FIX 3: fatigue_score_val, readiness_score_val, coaching_flags_val are now
+    included in the JSON payload so the Kafka staging topic matches the PG schema.
+    NaN scores are serialized as null (not raised) — they are derived values,
+    not raw load fields, so graceful degradation applies.
     """
     # Guard ACR: None and NaN both become null in JSON.
     if acr_val is None or (isinstance(acr_val, float) and math.isnan(acr_val)):
         acr_json: "float | None" = None
     else:
         acr_json = float(acr_val)
+
+    # Guard score fields: None and NaN both become null in JSON (graceful degradation).
+    def _score_to_json(val: "float | None") -> "float | None":
+        if val is None:
+            return None
+        if isinstance(val, float) and math.isnan(val):
+            return None
+        return float(val)
 
     payload = {
         "athlete_id": athlete_id,
@@ -415,6 +443,10 @@ def metrics_row_to_json(
         "chronic_load_42d": chronic_load_42d_val,
         "acute_chronic_ratio": acr_json,
         "deload_flag": deload_flag,
+        # FIX 3: v2 fields included in Kafka staging JSON.
+        "fatigue_score": _score_to_json(fatigue_score_val),
+        "readiness_score": _score_to_json(readiness_score_val),
+        "coaching_flags": coaching_flags_val if coaching_flags_val is not None else [],
     }
     # allow_nan=False enforces RFC 8259: any non-finite float raises ValueError
     # so the Flink operator can route the record to the DLQ (fail-fast).
