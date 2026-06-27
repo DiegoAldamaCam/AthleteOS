@@ -4,7 +4,7 @@
 #   core      -> kafka, schema-registry, flink-jobmanager, flink-taskmanager, postgres
 #   bootstrap -> schema-bootstrap (one-shot: register schemas + create topics)
 #   ingest    -> ingestion (file watcher/producers; PR2 fills this)
-#   serve     -> fastapi (Phase 7 web/ SPA will be added here)
+#   serve     -> fastapi (real API, WU-2) + web SPA (WU-4, not yet added)
 #
 # Start everything needed for the MVP strength slice:
 #   docker compose --profile core --profile bootstrap up -d
@@ -168,18 +168,26 @@ services:
       - ./data:/data
     command: ["sleep", "infinity"]
 
-  # Placeholder FastAPI service. PR6 fills the real Dockerfile + app.
   fastapi:
-    image: python:3.12-slim
+    build:
+      context: .
+      dockerfile: api/Dockerfile
     profiles: ["serve"]
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       DATABASE_URL: "postgresql://athleteos:athleteos@postgres:5432/athleteos"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      CORS_ORIGINS: "http://localhost:5173"
     ports:
       - "8000:8000"
-    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
 volumes:
   postgres-data:
