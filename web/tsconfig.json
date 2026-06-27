@@ -20,6 +20,9 @@
       "@/*": ["src/*"]
     },
 
+    /* Vite client types (import.meta.env) */
+    "types": ["vite/client"],
+
     /* Linting */
     "strict": true,
     "noUnusedLocals": true,
