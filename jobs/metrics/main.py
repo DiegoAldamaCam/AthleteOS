@@ -1,4 +1,4 @@
-"""PyFlink metrics job wiring (PR4, Phase 5, tasks 5.1-5.5).
+r"""PyFlink metrics job wiring (PR4, Phase 5, tasks 5.1-5.5).
 
 Import-isolation contract
 =========================
@@ -252,6 +252,16 @@ class MetricsJobConfig:
     a quote, newline, or null byte could inject arbitrary connector properties.
     These four fields are validated at construction time; invalid values raise
     ValueError immediately, before any DDL is executed.
+
+    PR5 sink options (default None = disabled, so PR4 tests are unaffected):
+      pg_dsn: psycopg2 DSN string for the serving-store PG UPSERT sink.
+              When set, the job also writes derived metrics to athlete_metrics.
+              The DDL (storage/postgres/ddl.sql) must already be applied to
+              the target PG before the job starts (handled by integration tests
+              and production migration steps; the job itself does NOT run DDL).
+      iceberg_warehouse: Path to the Iceberg warehouse root directory.
+              When set, the job also appends canonical training_event records
+              to the Iceberg analytical store via storage.iceberg.sink.
     """
 
     def __init__(
@@ -270,6 +280,9 @@ class MetricsJobConfig:
         bounded: bool = False,
         parallelism: int | None = None,
         no_restart: bool = False,
+        # PR5 sink options — default None so existing PR4 tests are unaffected.
+        pg_dsn: "str | None" = None,
+        iceberg_warehouse: "str | None" = None,
     ) -> None:
         # Validate all fields that are interpolated into the DDL f-string.
         # Must run BEFORE assignment so a bad value never reaches run(). (RISK F1)
@@ -307,6 +320,9 @@ class MetricsJobConfig:
         self.bounded = bounded
         self.parallelism = parallelism
         self.no_restart = no_restart
+        # PR5: optional sink targets (None = disabled, sinks not wired).
+        self.pg_dsn = pg_dsn
+        self.iceberg_warehouse = iceberg_warehouse
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +367,7 @@ def run(config: MetricsJobConfig) -> None:  # pragma: no cover - flink runtime
         AggregateFunction,
         KeyedProcessFunction,
         MapFunction,
+        ProcessFunction,
         ProcessWindowFunction,
     )
     from pyflink.datastream.state import StateTtlConfig, ValueStateDescriptor
@@ -889,6 +906,172 @@ CREATE TABLE canonical_training_event_source (
         .build()
     )
     metrics_json_stream.sink_to(metrics_sink)
+
+    # --- PR5 serving-store sinks (config-gated; default None = disabled) ----
+    #
+    # Design note — which upstream stream feeds each sink:
+    #
+    #   PG UPSERT sink  <- metrics_stream (per-(athlete_id, metric_date) DERIVED
+    #                      METRICS row).  This is correct: the serving store
+    #                      holds derived metrics, one row per athlete per day.
+    #
+    #   Iceberg sink    <- deduped (the deduplicated canonical training_event
+    #                      stream, BEFORE the daily window aggregation).  This
+    #                      is correct per the analytical-store spec: Iceberg
+    #                      holds raw EVENTS (training_event grain), not derived
+    #                      metrics.  Tapping the deduped stream (post-dedup,
+    #                      pre-aggregation) gives exactly the canonical events
+    #                      after the event_id TTL dedup has dropped duplicates,
+    #                      which is the cleanest grain for the analytical store.
+    #                      The metrics stream (post-window) only carries
+    #                      per-day aggregates — wrong grain for Iceberg.
+    #
+    # AT_LEAST_ONCE + idempotent UPSERT (PG) / append-only (Iceberg) means
+    # replays do not corrupt data.  No 2PC / exactly-once coordinator needed
+    # (approved PR5 decision, obs #48 OQ-1).
+
+    if config.pg_dsn is not None:
+        class _PgUpsertFn(ProcessFunction):  # type: ignore[misc]
+            """Per-element PG UPSERT ProcessFunction for the metrics stream (PR5).
+
+            Writes each metrics Row to PostgreSQL immediately inside
+            process_element() via the storage.postgres.sink UPSERT helper.
+            Per-element commits avoid dependency on close() being called in the
+            minicluster.  AT_LEAST_ONCE + idempotent UPSERT ensures correctness
+            under replay without 2PC (approved PR5 decision, obs #48 OQ-1).
+
+            Retry policy: up to _MAX_RETRIES attempts per element with
+            exponential back-off.  On exhaustion, logs the error and continues
+            (pragmatic; metrics are re-derivable from the Kafka + Iceberg stores
+            on the next checkpoint replay).
+            """
+
+            _MAX_RETRIES = 3
+            _BASE_BACKOFF_S = 0.5
+
+            def open(self, runtime_context: Any) -> None:
+                import psycopg2  # lazy — pyflink runtime only
+
+                self._conn = psycopg2.connect(config.pg_dsn)
+                self._conn.autocommit = False
+
+            def process_element(self, value: Any, ctx: Any) -> None:
+                # value = metrics Row(athlete_id, metric_date, acute_load,
+                #   chronic_load_28d, chronic_load_42d, acute_chronic_ratio,
+                #   deload_flag).
+                import time as _time
+
+                from storage.postgres.sink import execute_upsert
+
+                record = {
+                    "athlete_id": value[IDX_ACR_ATHLETE_ID],
+                    "metric_date": value[IDX_ACR_METRIC_DATE],
+                    "acute_load": value[IDX_ACR_ACUTE],
+                    "chronic_load_28d": value[IDX_ACR_CHRONIC_28D],
+                    "chronic_load_42d": value[IDX_ACR_CHRONIC_42D],
+                    "acute_chronic_ratio": value[IDX_ACR],
+                    "deload_flag": value[IDX_METRICS_DELOAD_FLAG],
+                }
+                last_exc: "BaseException | None" = None
+                for attempt in range(self._MAX_RETRIES):
+                    try:
+                        cur = self._conn.cursor()
+                        execute_upsert(cur, record)
+                        self._conn.commit()
+                        cur.close()
+                        # Yield the athlete_id as a routing token so the output
+                        # stream is non-empty and .print() is not pruned.
+                        yield str(value[IDX_ACR_ATHLETE_ID])
+                        return
+                    except Exception as exc:  # noqa: BLE001
+                        last_exc = exc
+                        try:
+                            self._conn.rollback()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        if attempt < self._MAX_RETRIES - 1:
+                            _time.sleep(self._BASE_BACKOFF_S * (2 ** attempt))
+
+                import sys as _sys
+
+                print(
+                    f"[PgUpsertFn] WARN: UPSERT failed after {self._MAX_RETRIES} "
+                    f"retries for record athlete_id={record.get('athlete_id')!r}. "
+                    f"Last error: {last_exc!r}",
+                    file=_sys.stderr,
+                )
+
+            def close(self) -> None:
+                try:
+                    self._conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        # process() returns a DataStream[STRING] — sink it with print() to
+        # keep the operator in the job graph (Flink may prune unconnected nodes).
+        # Each process_element() yields the athlete_id token so the stream is
+        # non-empty and the .print() sink forces execution of the full chain.
+        metrics_stream.process(_PgUpsertFn(), output_type=Types.STRING()).print()
+
+    if config.iceberg_warehouse is not None:
+        # Iceberg analytical store: raw canonical training_event records.
+        # Tapped off the deduped stream (post-event_id dedup, pre-aggregation).
+        _canon_fields_ice = canonical_field_names
+
+        class _IcebergAppendFn(ProcessFunction):  # type: ignore[misc]
+            """Per-element Iceberg append ProcessFunction for canonical events (PR5).
+
+            Appends each canonical Row to the Iceberg training_event table
+            immediately inside process_element().  Per-element appends avoid
+            dependency on close() being called in the minicluster.
+            AT_LEAST_ONCE + append-only; rare duplicates bounded by 7d dedup
+            TTL on the upstream deduped stream (obs #48 OQ-1).
+            """
+
+            def open(self, runtime_context: Any) -> None:
+                from pyiceberg.catalog.sql import SqlCatalog
+
+                from storage.iceberg.tables import create_training_event_table
+
+                warehouse = config.iceberg_warehouse
+                # Use str(warehouse) without a file:// prefix — consistent with
+                # the unit test pattern (test_iceberg_sink.py _make_catalog).
+                # The file:// form on Windows requires a PyArrowFileIO shim;
+                # the bare path works cross-platform with SqlCatalog + PyArrow.
+                catalog = SqlCatalog(
+                    "default",
+                    **{
+                        "uri": f"sqlite:///{warehouse}/catalog.db",
+                        "warehouse": str(warehouse),
+                    },
+                )
+                self._table = create_training_event_table(catalog)
+
+            def process_element(self, value: Any, ctx: Any) -> None:
+                # value = canonical Row; field order matches canonical_field_names.
+                from storage.iceberg.sink import append_events
+
+                record = {
+                    name: value[i]
+                    for i, name in enumerate(_canon_fields_ice)
+                }
+                try:
+                    append_events(self._table, [record])
+                    # Yield event_id token so the output stream is non-empty
+                    # and .print() is not pruned by the plan optimizer.
+                    yield str(value[0])  # event_id at index 0
+                except Exception as exc:  # noqa: BLE001
+                    import sys as _sys
+
+                    print(
+                        f"[IcebergAppendFn] WARN: append failed for "
+                        f"event_id={value[0]!r}: {exc!r}",
+                        file=_sys.stderr,
+                    )
+
+        # process() returns a DataStream[STRING] — sink it with print() to
+        # keep the operator in the job graph (see PG sink note above).
+        deduped.process(_IcebergAppendFn(), output_type=Types.STRING()).print()
 
     # --- DLQ sink: NaN guard + late side outputs -> dlq.canonical.training_event
     # (JSON, AT_LEAST_ONCE per design ADR-12).
