@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173"
     cors_allow_credentials: bool = True
     kafka_admin_request_timeout: float = 5.0  # seconds; env var: KAFKA_ADMIN_REQUEST_TIMEOUT
+    db_connect_timeout: float = 5.0  # seconds; env var: DB_CONNECT_TIMEOUT
 
     @property
     def cors_origins_list(self) -> list[str]:

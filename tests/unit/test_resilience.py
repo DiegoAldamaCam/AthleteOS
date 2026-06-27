@@ -4,10 +4,10 @@ Spec source: obs #98 — Slice B requirements.
 Design source: obs #99 — ADR H2 (exception handler), H4 (/health readiness), H6 (connect_timeout).
 
 Tests in this file are ALL pure unit tests: no Docker, no real DB, no real Kafka.
-Readiness probe dependencies are overridden via FastAPI dependency_overrides.
+/health probe functions are monkeypatched at the api.main module level for speed.
 
 Scenarios covered:
-  B1  — DB connect_timeout propagated to psycopg2.connect
+  B1  — DB connect_timeout propagated to psycopg2.connect (Settings field + db.py kwarg)
   B3  — Unhandled RuntimeError → HTTP 500 JSON {"detail": "Internal Server Error"}
   B4  — HTTPException 404 is NOT swallowed (still 404)
   B5  — HTTPException 422 is NOT swallowed (still 422)
@@ -39,10 +39,8 @@ class TestConnectTimeout:
     def test_db_connect_passes_connect_timeout_to_psycopg2(self, monkeypatch):
         """api/db.py get_db() must pass connect_timeout=settings.db_connect_timeout to psycopg2.connect."""
         import importlib
-        import api.config as _cfg
 
-        # Use a fresh Settings with a known timeout value
-        captured_kwargs = {}
+        captured_kwargs: dict = {}
 
         class _FakeConn:
             def close(self):
@@ -55,7 +53,7 @@ class TestConnectTimeout:
         import psycopg2
         monkeypatch.setattr(psycopg2, "connect", _fake_connect)
 
-        # Force reload so db.py picks up the monkeypatched psycopg2
+        # Reload db.py so it picks up the monkeypatched psycopg2
         import api.db as _db
         importlib.reload(_db)
 
@@ -69,8 +67,8 @@ class TestConnectTimeout:
         assert "connect_timeout" in captured_kwargs, (
             "psycopg2.connect() was not called with connect_timeout keyword argument"
         )
-        assert captured_kwargs["connect_timeout"] == _db.settings.db_connect_timeout, (
-            f"connect_timeout mismatch: expected {_db.settings.db_connect_timeout}, "
+        assert captured_kwargs["connect_timeout"] == int(_db.settings.db_connect_timeout), (
+            f"connect_timeout mismatch: expected {int(_db.settings.db_connect_timeout)}, "
             f"got {captured_kwargs['connect_timeout']}"
         )
 
@@ -84,30 +82,46 @@ class TestGlobalExceptionHandler:
 
     @pytest.fixture
     def client(self):
-        """TestClient for the FastAPI app with a synthetic crash route."""
-        from fastapi import HTTPException
-        from starlette.testclient import TestClient
+        """TestClient with a synthetic crash route injected into the app.
+
+        Also overrides get_db with a no-op stub so tests that hit DB-backed
+        routes (e.g. /athletes/{id}/metrics for 422) don't fail due to missing
+        local Postgres — the spec behavior under test is FastAPI's validation
+        layer, which fires before (or concurrently with) dependency resolution.
+        """
         import importlib
         import os
-
-        # Ensure clean settings without real DB needed
-        os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
+        from contextlib import contextmanager
+        from unittest.mock import MagicMock
 
         import api.main as _main
+        from api.db import get_db
+
+        os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
         importlib.reload(_main)
         app = _main.app
 
-        # Add a synthetic route that raises RuntimeError (only for testing)
+        # Stub the DB dependency so no real connection is attempted
+        def _fake_db():
+            mock_conn = MagicMock()
+            mock_conn.__enter__ = lambda s: s
+            mock_conn.__exit__ = MagicMock(return_value=False)
+            yield mock_conn
+
+        app.dependency_overrides[get_db] = _fake_db
+
+        # Inject a route that raises RuntimeError — only lives for this test
         @app.get("/_test_crash")
         def _crash():
             raise RuntimeError("boom — intentional crash for test")
 
+        from starlette.testclient import TestClient
         with TestClient(app, raise_server_exceptions=False) as c:
             yield c
 
-        # Remove the synthetic route after the test
-        # (routes are registered, so we reload to clear it)
-        app.routes[:] = [r for r in app.routes if not getattr(r, "path", "") == "/_test_crash"]
+        # Clean up: remove overrides and synthetic route
+        app.dependency_overrides.pop(get_db, None)
+        app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != "/_test_crash"]
 
     def test_unhandled_runtime_error_returns_500_json(self, client):
         """B3: RuntimeError not caught by route → HTTP 500 with {"detail": ...}."""
@@ -115,109 +129,101 @@ class TestGlobalExceptionHandler:
         assert resp.status_code == 500, f"Expected 500, got {resp.status_code}"
         body = resp.json()
         assert "detail" in body, f"Expected 'detail' key in body, got: {body}"
-        # Must NOT leak the stack trace
+        # Must NOT leak the stack trace in the response body
         assert "traceback" not in str(body).lower()
         assert "Traceback" not in str(body)
 
-    def test_500_body_contains_generic_message_not_internal_error(self, client):
-        """B3 triangulation: body detail must be a string (not the raw exception message)."""
+    def test_500_body_detail_is_generic_not_raw_exception(self, client):
+        """B3 triangulation: body detail must be generic, not the raw exception message."""
         resp = client.get("/_test_crash")
         body = resp.json()
-        # The detail must be a safe generic string, not 'boom — intentional crash for test'
+        # The detail must not expose the raw RuntimeError message to clients
         assert body["detail"] != "boom — intentional crash for test", (
             "Exception handler leaked the raw exception message to the client"
         )
 
     def test_404_not_swallowed_by_exception_handler(self, client):
-        """B4: GET to a non-existent route still returns 404, not 500."""
-        resp = client.get("/athletes/NONEXISTENT_ID_THAT_DOES_NOT_EXIST/metrics")
+        """B4: GET to a path that does not exist returns 404, not 500.
+
+        Uses a path that has no registered route — Starlette returns 404 before
+        any dependency or exception handler is invoked. This proves the broad
+        Exception handler does NOT intercept Starlette's own 404 responses.
+        """
+        resp = client.get("/athletes/A1/metrics/does-not-exist/extra-segment")
         assert resp.status_code == 404, f"Expected 404, got {resp.status_code}"
 
     def test_422_not_swallowed_by_exception_handler(self, client):
-        """B5: Invalid query param still returns 422, not 500."""
+        """B5: Invalid query param type (from=not-a-date) returns 422, not 500.
+
+        FastAPI's RequestValidationError handler fires before any route handler
+        or dependency executes — the broad Exception handler must not intercept it.
+        """
         resp = client.get("/athletes/A1/metrics?from=not-a-date")
         assert resp.status_code == 422, f"Expected 422, got {resp.status_code}"
 
 
 # ---------------------------------------------------------------------------
-# B-1.3 / B-1.4 / B-1.6  /health readiness probe (unit — mocked deps)
+# B-1.3 / B-1.4 / B-1.6  /health readiness probe (unit — monkeypatched)
 # ---------------------------------------------------------------------------
 
 class TestHealthReadiness:
-    """/health returns 200 both-ok; 503+body on DB down; 503+body on Kafka down."""
+    """/health returns 200 when both probes pass; 503+body when either fails.
+
+    Monkeypatches api.main._probe_db and api.main._probe_kafka so tests run
+    without Docker, real DB, or real Kafka.
+    """
 
     @pytest.fixture
-    def fresh_app(self):
-        """Reload api.main so we get a clean app without leftover test routes."""
+    def health_client(self, monkeypatch):
+        """TestClient with probe functions injectable via monkeypatch."""
         import importlib
         import os
+        import api.main as _main
 
         os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
-
-        import api.main as _main
         importlib.reload(_main)
-        return _main.app
 
-    def test_health_200_when_both_deps_healthy(self, fresh_app):
-        """B6: Both DB probe and Kafka probe succeed → HTTP 200."""
         from starlette.testclient import TestClient
-        from api.main import _probe_db, _probe_kafka  # noqa: F401
+        with TestClient(_main.app, raise_server_exceptions=False) as c:
+            yield c, monkeypatch, _main
 
-        def _ok_db():
-            pass  # no exception = healthy
+    def test_health_200_when_both_deps_healthy(self, health_client):
+        """B6: Both probes succeed → HTTP 200."""
+        client, mp, main_mod = health_client
 
-        def _ok_kafka():
-            pass  # no exception = healthy
+        mp.setattr(main_mod, "_probe_db", lambda: None)
+        mp.setattr(main_mod, "_probe_kafka", lambda: None)
 
-        fresh_app.dependency_overrides[_probe_db] = _ok_db
-        fresh_app.dependency_overrides[_probe_kafka] = _ok_kafka
-
-        with TestClient(fresh_app) as client:
-            resp = client.get("/health")
-
-        fresh_app.dependency_overrides.clear()
+        resp = client.get("/health")
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
 
-    def test_health_503_when_db_probe_fails(self, fresh_app):
-        """B7: DB probe raises → HTTP 503, body names 'db'."""
-        from starlette.testclient import TestClient
-        from api.main import _probe_db, _probe_kafka  # noqa: F401
+    def test_health_503_when_db_probe_fails(self, health_client):
+        """B7: DB probe raises → HTTP 503, body contains 'db' key."""
+        client, mp, main_mod = health_client
 
         def _fail_db():
-            raise Exception("DB unreachable")
+            raise Exception("DB connection refused")
 
-        def _ok_kafka():
-            pass
+        mp.setattr(main_mod, "_probe_db", _fail_db)
+        mp.setattr(main_mod, "_probe_kafka", lambda: None)
 
-        fresh_app.dependency_overrides[_probe_db] = _fail_db
-        fresh_app.dependency_overrides[_probe_kafka] = _ok_kafka
-
-        with TestClient(fresh_app) as client:
-            resp = client.get("/health")
-
-        fresh_app.dependency_overrides.clear()
+        resp = client.get("/health")
         assert resp.status_code == 503, f"Expected 503, got {resp.status_code}"
         body = resp.json()
-        assert "db" in str(body).lower(), f"Expected 'db' in 503 body, got: {body}"
+        assert "db" in body, f"Expected 'db' key in 503 body, got: {body}"
 
-    def test_health_503_when_kafka_probe_fails(self, fresh_app):
-        """B8: Kafka probe raises → HTTP 503, body names 'kafka'."""
-        from starlette.testclient import TestClient
-        from api.main import _probe_db, _probe_kafka  # noqa: F401
+    def test_health_503_when_kafka_probe_fails(self, health_client):
+        """B8: Kafka probe raises → HTTP 503, body contains 'kafka' key."""
+        client, mp, main_mod = health_client
 
-        def _ok_db():
-            pass
+        mp.setattr(main_mod, "_probe_db", lambda: None)
 
         def _fail_kafka():
-            raise Exception("Kafka unreachable")
+            raise Exception("Kafka broker unreachable")
 
-        fresh_app.dependency_overrides[_probe_db] = _ok_db
-        fresh_app.dependency_overrides[_probe_kafka] = _fail_kafka
+        mp.setattr(main_mod, "_probe_kafka", _fail_kafka)
 
-        with TestClient(fresh_app) as client:
-            resp = client.get("/health")
-
-        fresh_app.dependency_overrides.clear()
+        resp = client.get("/health")
         assert resp.status_code == 503, f"Expected 503, got {resp.status_code}"
         body = resp.json()
-        assert "kafka" in str(body).lower(), f"Expected 'kafka' in 503 body, got: {body}"
+        assert "kafka" in body, f"Expected 'kafka' key in 503 body, got: {body}"

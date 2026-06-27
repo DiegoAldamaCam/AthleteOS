@@ -25,7 +25,7 @@ def get_db() -> Generator:
             with db.cursor() as cur:
                 cur.execute(...)
     """
-    conn = psycopg2.connect(settings.database_url)
+    conn = psycopg2.connect(settings.database_url, connect_timeout=int(settings.db_connect_timeout))
     try:
         yield conn
     finally:

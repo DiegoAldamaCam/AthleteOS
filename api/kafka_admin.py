@@ -178,11 +178,17 @@ def _depth_for_topic(
     end_offset_specs = {tp: OffsetSpec.latest() for tp in partitions}
     end_futures = admin.list_offsets(end_offset_specs, request_timeout=request_timeout)
 
+    from confluent_kafka import OFFSET_INVALID
+
     total_end = 0
     for tp, future in end_futures.items():
         result = future.result()  # raises on failure
         offset = result.offset
-        if offset > 0:
+        # ADR H7: explicit named guard for the OFFSET_INVALID sentinel (-1001).
+        # A partition returning OFFSET_INVALID contributes 0 to depth;
+        # broker_reachable remains True (the broker responded — the offset is
+        # simply unavailable for this partition).
+        if offset != OFFSET_INVALID and offset > 0:
             total_end += offset
 
     # No consumer group for DLQ topics → depth = total end-offset

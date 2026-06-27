@@ -176,6 +176,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
     environment:
       DATABASE_URL: "postgresql://athleteos:athleteos@postgres:5432/athleteos"
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
@@ -183,11 +185,13 @@ services:
     ports:
       - "8000:8000"
     healthcheck:
+      # /health is now a readiness probe: DB SELECT 1 + Kafka list_topics (5s each).
+      # start_period covers the sum of both probe timeouts plus app startup latency.
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
-      timeout: 5s
+      timeout: 15s
       retries: 5
-      start_period: 15s
+      start_period: 20s
 
   # React SPA served via Nginx (WU-4).
   # Profile: serve (alongside fastapi). Start with:
