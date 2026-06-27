@@ -233,6 +233,32 @@ describe('Scenario: statusText passthrough in DLQ error', () => {
 })
 
 // ---------------------------------------------------------------------------
+// Scenario 7: DLQ fetch rejects — error state in DLQ panel, metrics unaffected
+// (Item 9 — reverse-independence direction)
+// ---------------------------------------------------------------------------
+describe('Scenario: dlq-fetch-error — metrics renders, DLQ shows error', () => {
+  it('shows DLQ error alert and metrics chart renders normally when DLQ fetch rejects', async () => {
+    mockFetchMetrics.mockResolvedValue(makeMetricRows(5))
+    mockFetchDlqDepth.mockRejectedValue(new Error('Network error: fetch failed'))
+
+    renderDashboard(makeClient())
+
+    // Metrics chart MUST render normally — independence contract
+    const chart = await screen.findByRole('img')
+    expect(chart).toBeInTheDocument()
+    expect(chart).toHaveAttribute('aria-label')
+
+    // DLQ panel MUST show an error indicator (role=alert) — NOT the pipeline panel
+    const alert = await screen.findByRole('alert')
+    expect(alert).toBeInTheDocument()
+    expect(alert.textContent).not.toBe('')
+
+    // Pipeline health panel must NOT be rendered (DLQ data unavailable)
+    expect(screen.queryByText(/Pipeline Health/i)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Scenario 6: DLQ broker unreachable
 // ---------------------------------------------------------------------------
 describe('Scenario: dlq-broker-unreachable', () => {
