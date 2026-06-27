@@ -3,14 +3,16 @@ schema: spec-driven
 context: |
   Project: AthleteOS — real-time athlete data platform (portfolio-grade)
   Stack: Python 3.11, PyFlink 1.19, Kafka (confluent-kafka), Schema Registry (fastavro),
-    pyiceberg 0.7.x, PostgreSQL (psycopg2), DuckDB, FastAPI + uvicorn, Docker Compose
+    pyiceberg 0.7.x, PostgreSQL (psycopg2), DuckDB, FastAPI + uvicorn, Docker Compose,
+    React 18 + Vite 5 + TypeScript (pnpm), TanStack Query, Recharts, React Router v6,
+    Nginx (static serve, multi-stage Docker)
   Phases 1-6: MERGED to master (ingestion, canonical model, stream processing,
     serving store [PG UPSERT], analytical store [Iceberg + DuckDB read path + parity])
-  Phase 7 (incoming): React + Vite + TypeScript SPA replacing the Streamlit stub;
-    frontend lives in web/ (to be created); consumes FastAPI backend;
-    JS/TS tooling (npm/pnpm, vitest, eslint, prettier) NOT yet on disk.
+  Phase 7: COMPLETE (master @ 292a9c4) — Streamlit stub replaced by React SPA in web/;
+    FastAPI extended with GET /athletes/{id}/metrics (time-series) and
+    GET /pipeline/dlq-depth (graceful-degrade); CI has 3 parallel jobs (unit/integration/frontend).
   Architecture: event-time-first, layered (raw → canonical → stream → serving → analytical → API/UI)
-  Last refreshed: 2026-06-27 (init guard for Phase 7)
+  Last refreshed: 2026-06-27 (athleteos-phase7-web archived)
 
 strict_tdd: true
 
@@ -31,14 +33,21 @@ testing:
   config_file: pytest.ini
   note: "strict_tdd: true — pytest runner and test files confirmed present. RED→GREEN→REFACTOR required in all apply phases."
 
-  # Frontend (Phase 7 — pending)
+  # Frontend (Phase 7 — COMPLETE, tooling live on master @ 292a9c4)
   frontend:
-    status: pending_phase_7
-    runner: vitest          # conventional for React+Vite+TS — NOT YET PRESENT
-    lint: eslint            # NOT YET PRESENT
-    format: prettier        # NOT YET PRESENT
-    typecheck: "tsc --noEmit"  # NOT YET PRESENT
-    note: "Frontend tooling (vitest, eslint, prettier, tsc) will be introduced by Phase 7. Do not use these commands until they are scaffolded."
+    status: active
+    runner: vitest
+    runner_status: present
+    command: "pnpm test"
+    lint_command: "pnpm lint"
+    typecheck_command: "pnpm exec tsc --noEmit"
+    build_command: "pnpm build"
+    working_directory: web/
+    package_manager: pnpm
+    environment: happy-dom
+    test_files: "web/src/components/__tests__/DashboardPage.test.tsx, web/src/utils/densifySeries.test.ts, web/src/App.test.tsx"
+    ci_job: frontend
+    note: "Frontend tooling fully scaffolded by Phase 7. 13 tests passing (6 dashboard behavior + 6 densifySeries + 1 smoke). pnpm 9.15.9, vitest ^2.0.3, RTL ^16, happy-dom."
 
 rules:
   proposal:
@@ -71,3 +80,4 @@ rules:
   archive:
     - Warn before merging destructive deltas
     - Update openspec/config.yaml testing.frontend block once Phase 7 tooling is live
+    # Phase 7 archive rule fulfilled: testing.frontend updated 2026-06-27
