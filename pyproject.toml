@@ -41,7 +41,6 @@ dependencies = [
   # UI/API deps keep a floor only; minor bumps here are low-risk for this slice.
   "fastapi>=0.110",
   "uvicorn[standard]>=0.29",
-  "streamlit>=1.33",
   "sentry-sdk>=2.0,<3",
 ]
 
@@ -65,7 +64,6 @@ include = [
   "storage*",
   "schemas*",
   "api*",
-  "ui*",
 ]
 exclude = ["tests*", "openspec*", "data*"]
 

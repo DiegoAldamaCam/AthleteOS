@@ -4,7 +4,7 @@
 #   core      -> kafka, schema-registry, flink-jobmanager, flink-taskmanager, postgres
 #   bootstrap -> schema-bootstrap (one-shot: register schemas + create topics)
 #   ingest    -> ingestion (file watcher/producers; PR2 fills this)
-#   serve     -> fastapi, streamlit (PR6 fills these)
+#   serve     -> fastapi (Phase 7 web/ SPA will be added here)
 #
 # Start everything needed for the MVP strength slice:
 #   docker compose --profile core --profile bootstrap up -d
@@ -179,16 +179,6 @@ services:
       DATABASE_URL: "postgresql://athleteos:athleteos@postgres:5432/athleteos"
     ports:
       - "8000:8000"
-    command: ["sleep", "infinity"]
-
-  # Placeholder Streamlit service. PR6 fills the real Dockerfile + dashboard.
-  streamlit:
-    image: python:3.12-slim
-    profiles: ["serve"]
-    environment:
-      DATABASE_URL: "postgresql://athleteos:athleteos@postgres:5432/athleteos"
-    ports:
-      - "8501:8501"
     command: ["sleep", "infinity"]
 
 volumes:
