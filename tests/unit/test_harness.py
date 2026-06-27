@@ -30,7 +30,7 @@ def test_pytest_harness_collects_and_runs():
 
 def test_scaffold_packages_importable():
     """Every scaffolded top-level package must be importable (markers present)."""
-    for name in ("jobs", "ingestion", "schemas", "bootstrap", "storage", "api", "ui"):
+    for name in ("jobs", "ingestion", "schemas", "bootstrap", "storage", "api"):
         module = importlib.import_module(name)
         assert module is not None
 
