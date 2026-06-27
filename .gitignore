@@ -48,3 +48,7 @@ _checkpoints_*/
 
 # Ephemeral orchestrator prompt scratch files
 prompt.md
+
+# Frontend (web/)
+web/node_modules/
+web/dist/
