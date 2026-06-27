@@ -84,31 +84,39 @@ class TestGlobalExceptionHandler:
     def client(self):
         """TestClient with a synthetic crash route injected into the app.
 
-        Also overrides get_db with a no-op stub so tests that hit DB-backed
-        routes (e.g. /athletes/{id}/metrics for 422) don't fail due to missing
-        local Postgres — the spec behavior under test is FastAPI's validation
-        layer, which fires before (or concurrently with) dependency resolution.
+        Performs a full reload chain (db → routers → main) so every module
+        picks up a consistent get_db function object. Overrides all variants
+        of get_db that might be in the dependency graph by patching the
+        dependency_overrides on ALL known references.
         """
         import importlib
         import os
-        from contextlib import contextmanager
         from unittest.mock import MagicMock
 
-        import api.main as _main
-        from api.db import get_db
-
         os.environ.setdefault("CORS_ORIGINS", "http://localhost:5173")
+
+        # Full reload chain: db first, then routers that depend on it, then main
+        import api.db as _db
+        importlib.reload(_db)
+        import api.routers.metrics as _rm
+        importlib.reload(_rm)
+        import api.routers.pipeline as _rp
+        importlib.reload(_rp)
+        import api.main as _main
         importlib.reload(_main)
         app = _main.app
 
-        # Stub the DB dependency so no real connection is attempted
+        # After full reload, get_db in _db module matches what the freshly-reloaded
+        # router imported; use that reference as the override key.
+        reloaded_get_db = _db.get_db
+
         def _fake_db():
             mock_conn = MagicMock()
             mock_conn.__enter__ = lambda s: s
             mock_conn.__exit__ = MagicMock(return_value=False)
             yield mock_conn
 
-        app.dependency_overrides[get_db] = _fake_db
+        app.dependency_overrides[reloaded_get_db] = _fake_db
 
         # Inject a route that raises RuntimeError — only lives for this test
         @app.get("/_test_crash")
@@ -120,7 +128,7 @@ class TestGlobalExceptionHandler:
             yield c
 
         # Clean up: remove overrides and synthetic route
-        app.dependency_overrides.pop(get_db, None)
+        app.dependency_overrides.pop(reloaded_get_db, None)
         app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != "/_test_crash"]
 
     def test_unhandled_runtime_error_returns_500_json(self, client):
