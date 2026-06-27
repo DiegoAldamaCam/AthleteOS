@@ -1,8 +1,9 @@
 # AthleteOS CI
 #
-# Two-job pipeline:
+# Three-job pipeline:
 #   unit        — fast gate on every push/PR to master (no Docker required)
 #   integration — Docker-backed testcontainers suite (ubuntu-latest has Docker pre-installed)
+#   frontend    — pnpm install → lint → tsc → test → build (runs in parallel, working-dir: web)
 #
 # Python is pinned to 3.11 exactly: apache-flink 1.19 ships wheels only for
 # CPython 3.8-3.11. Using 3.12+ would break the integration job at import time.
@@ -77,3 +78,49 @@ jobs:
 
       - name: Run integration tests
         run: pytest tests/integration/ -v
+
+  # ---------------------------------------------------------------------------
+  # Job 3: frontend
+  # Runs in parallel with unit and integration — no Python deps, no Docker.
+  # Validates the React SPA scaffold: lint, type-check, unit tests, production
+  # build. Working directory is web/ throughout. Uses pnpm (corepack).
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend (Node 20 + pnpm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type check
+        run: pnpm tsc --noEmit
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build

@@ -1,32 +1,50 @@
 schema: spec-driven
 
 context: |
-  Project: AthleteOS — real-time athlete data platform
-  Stack (intended): Python 3.12, Apache Kafka, Schema Registry, Apache Flink,
-    Apache Iceberg, PostgreSQL, FastAPI, Streamlit, Docker Compose
-  Optional: DuckDB, dbt-core, Trino
-  Observability: Prometheus, Grafana
-  Testing (intended): pytest
-  Architecture: event-time-first, layered (raw → canonical → stream processing → serving → analytical → API/UI)
-  Status: greenfield — no source code on disk yet
+  Project: AthleteOS — real-time athlete data platform (portfolio-grade)
+  Stack: Python 3.11, PyFlink 1.19, Kafka (confluent-kafka), Schema Registry (fastavro),
+    pyiceberg 0.7.x, PostgreSQL (psycopg2), DuckDB, FastAPI + uvicorn, Docker Compose
+  Phases 1-6: MERGED to master (ingestion, canonical model, stream processing,
+    serving store [PG UPSERT], analytical store [Iceberg + DuckDB read path + parity])
+  Phase 7 (incoming): React + Vite + TypeScript SPA replacing the Streamlit stub;
+    frontend lives in web/ (to be created); consumes FastAPI backend;
+    JS/TS tooling (npm/pnpm, vitest, eslint, prettier) NOT yet on disk.
+  Architecture: event-time-first, layered (raw → canonical → stream → serving → analytical → API/UI)
+  Last refreshed: 2026-06-27 (init guard for Phase 7)
 
-strict_tdd: false
+strict_tdd: true
 
 testing:
+  # Python backend (authoritative — active today)
   runner: pytest
-  runner_status: not_present
-  command: "pytest"
-  coverage_command: "pytest --cov"
+  runner_status: present
+  command: "python -m pytest"
+  unit_command: "python -m pytest tests/unit/ -v"
+  integration_command: "python -m pytest tests/integration/ -v"
+  coverage_command: "python -m pytest --cov"  # requires pytest-cov (not in dev deps yet)
   layers:
-    unit: false
-    integration: false
+    unit: true       # tests/unit/ — 11 files, no Docker
+    integration: true  # tests/integration/ — 6 files, testcontainers (Redpanda + PostgreSQL)
     e2e: false
-  note: "Intended runner is pytest. No pyproject.toml, pytest.ini, conftest.py, or test files exist yet. Strict TDD cannot activate until a test harness is bootstrapped."
+  markers:
+    integration: "tests requiring a running Docker daemon via testcontainers"
+  config_file: pytest.ini
+  note: "strict_tdd: true — pytest runner and test files confirmed present. RED→GREEN→REFACTOR required in all apply phases."
+
+  # Frontend (Phase 7 — pending)
+  frontend:
+    status: pending_phase_7
+    runner: vitest          # conventional for React+Vite+TS — NOT YET PRESENT
+    lint: eslint            # NOT YET PRESENT
+    format: prettier        # NOT YET PRESENT
+    typecheck: "tsc --noEmit"  # NOT YET PRESENT
+    note: "Frontend tooling (vitest, eslint, prettier, tsc) will be introduced by Phase 7. Do not use these commands until they are scaffolded."
 
 rules:
   proposal:
     - Include rollback plan for risky changes
     - Justify every technology choice with trade-offs
+    - For Phase 7: justify framework/routing/state-management choices (React is decided; router and state manager are open forks)
   specs:
     - Use Given/When/Then for scenarios
     - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
@@ -35,16 +53,21 @@ rules:
     - Include sequence diagrams for complex flows
     - Document architecture decisions with rationale (ADR format)
     - Event-time semantics must be explicit (watermark strategy, late data handling)
+    - For Phase 7: include component hierarchy diagram and API contract surface
   tasks:
     - Group by phase, use hierarchical numbering
     - Keep tasks completable in one session
+    - For Phase 7: separate backend API tasks from frontend scaffold + feature tasks
   apply:
     - Follow existing code patterns
-    tdd: false
-    test_command: "pytest"
+    tdd: true
+    test_command: "python -m pytest"
+    frontend_test_command: "vitest run"  # valid only after Phase 7 scaffolding
   verify:
-    test_command: "pytest"
+    test_command: "python -m pytest"
     build_command: "docker compose build"
     coverage_threshold: 0
+    frontend_verify: "vitest run && tsc --noEmit && eslint src/"  # valid only after Phase 7 scaffolding
   archive:
     - Warn before merging destructive deltas
+    - Update openspec/config.yaml testing.frontend block once Phase 7 tooling is live
