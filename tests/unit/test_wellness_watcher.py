@@ -156,3 +156,79 @@ def test_watch_directory_exits_when_stop_event_set(tmp_path):
 
     # Should exit well within 2 seconds
     assert elapsed < 2.0
+
+
+def test_watch_directory_survives_exception_in_process_directory(tmp_path):
+    """FIX 2: an exception in process_directory must not kill the watcher thread."""
+    call_count = 0
+    stop_event = threading.Event()
+
+    class _ExplodingPublisher:
+        def publish(self, record, **kwargs) -> str:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("simulated bad poll cycle")
+            return "fake-id"
+
+        def flush(self) -> None:
+            pass
+
+    (tmp_path / "a.csv").write_text(_HEADER + _VALID_ROW_1)
+    pub = _ExplodingPublisher()
+
+    def _run():
+        watch_directory(tmp_path, pub, poll_interval=0.05, stop_event=stop_event)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+    # Give the loop a moment to execute at least two poll cycles
+    time.sleep(0.3)
+    stop_event.set()
+    t.join(timeout=3.0)
+
+    assert not t.is_alive(), "watcher thread should have exited cleanly"
+    # call_count > 1 proves the loop continued after the first exception
+    assert call_count > 1, "loop should have run more than once (survived exception)"
+
+
+def test_watch_directory_runs_loop_then_stops_cleanly(tmp_path):
+    """FIX 4: watch_directory runs at least one full poll cycle before stop_event is set."""
+    (tmp_path / "a.csv").write_text(_HEADER + _VALID_ROW_1)
+    pub = _RecordingPublisher()
+    stop_event = threading.Event()
+
+    # Track whether at least one poll ran before we set the stop event
+    first_poll_done = threading.Event()
+
+    original_process_directory = __import__(
+        "ingestion.wellness.watcher", fromlist=["process_directory"]
+    ).process_directory
+
+    import ingestion.wellness.watcher as _watcher_mod
+
+    original = _watcher_mod.process_directory
+
+    def _patched(dir_path, publisher, uuid_factory=None, now=None):
+        result = original(dir_path, publisher, uuid_factory, now)
+        first_poll_done.set()
+        return result
+
+    _watcher_mod.process_directory = _patched
+    try:
+        def _run():
+            watch_directory(tmp_path, pub, poll_interval=0.05, stop_event=stop_event)
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+        # Wait until at least one poll ran, then stop
+        assert first_poll_done.wait(timeout=3.0), "first poll cycle never ran"
+        stop_event.set()
+        t.join(timeout=3.0)
+    finally:
+        _watcher_mod.process_directory = original
+
+    assert not t.is_alive(), "watcher thread should have exited cleanly"
+    assert len(pub.published_records) >= 1, "at least one record published in running poll"

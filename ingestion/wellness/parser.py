@@ -16,6 +16,7 @@ Wellness CSV columns:
 
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass
 from typing import Iterable, Mapping
 
@@ -100,15 +101,27 @@ def _to_optional_int(row: Mapping[str, str], field: str) -> int | None:
         raise MalformedRowError(f"unparseable int for {field!r}: {raw!r}") from exc
 
 
+def _require_iso_date(row: Mapping[str, str], field: str) -> str:
+    """Return a required field that must parse as a real ISO date, else raise."""
+    value = _require(row, field)
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError as exc:
+        raise MalformedRowError(
+            f"invalid ISO date for {field!r}: {value!r}"
+        ) from exc
+    return value
+
+
 def parse_row(raw_row: Mapping[str, str]) -> WellnessRecord:
     """Parse a single wellness CSV row into a typed WellnessRecord.
 
-    Raises MalformedRowError if a required field is missing/empty or a numeric
-    value cannot be parsed.
+    Raises MalformedRowError if a required field is missing/empty, the date is
+    not a real ISO date, or a numeric value cannot be parsed.
     """
     return WellnessRecord(
         athlete_id=_require(raw_row, "athlete_id"),
-        date=_require(raw_row, "date"),
+        date=_require_iso_date(raw_row, "date"),
         hrv=_to_optional_float(raw_row, "hrv"),
         sleep_hours=_to_optional_float(raw_row, "sleep_hours"),
         resting_hr=_to_optional_int(raw_row, "resting_hr"),

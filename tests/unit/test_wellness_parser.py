@@ -141,6 +141,60 @@ def test_parse_row_missing_date_raises():
         parse_row(row)
 
 
+# --- parse_row: invalid ISO date raises (date validation) ---
+
+
+def test_parse_row_slash_date_raises():
+    """A date in MM/DD/YYYY format is not ISO — must be collected as error."""
+    row = _valid_row()
+    row["date"] = "03/01/2025"
+
+    with pytest.raises(MalformedRowError):
+        parse_row(row)
+
+
+def test_parse_row_invalid_iso_date_raises():
+    """An out-of-range ISO-shaped date (month 13) must be collected as error."""
+    row = _valid_row()
+    row["date"] = "2025-13-99"
+
+    with pytest.raises(MalformedRowError):
+        parse_row(row)
+
+
+def test_parse_row_non_date_string_raises():
+    """A random string is not a valid date — must be collected as error."""
+    row = _valid_row()
+    row["date"] = "not-a-date"
+
+    with pytest.raises(MalformedRowError):
+        parse_row(row)
+
+
+def test_parse_row_valid_iso_date_accepted():
+    """A proper ISO date '2025-03-01' must be accepted and stored verbatim."""
+    row = _valid_row()
+    row["date"] = "2025-03-01"
+
+    record = parse_row(row)
+
+    assert record.date == "2025-03-01"
+
+
+def test_parse_csv_invalid_date_collected_not_crashed():
+    """parse_csv must collect invalid-date rows as errors, not raise or abort."""
+    good = _valid_row()
+    bad_slash = _valid_row()
+    bad_slash["date"] = "03/01/2025"
+    bad_slash["athlete_id"] = "BAD"
+
+    result = parse_csv([good, bad_slash])
+
+    assert len(result.records) == 1
+    assert result.records[0].athlete_id == "A1"
+    assert len(result.errors) == 1
+
+
 def test_parse_row_unparseable_hrv_raises():
     """A non-numeric hrv value raises MalformedRowError."""
     row = _valid_row()

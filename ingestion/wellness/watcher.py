@@ -18,7 +18,7 @@ Mirrors ``ingestion/strength/watcher.py`` symbol-for-symbol.
 from __future__ import annotations
 
 import csv
-import time
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -103,5 +103,8 @@ def watch_directory(
     event = stop_event or Event()
     dir_path = Path(dir_path)
     while not event.is_set():
-        process_directory(dir_path, publisher, uuid_factory, now)
+        try:
+            process_directory(dir_path, publisher, uuid_factory, now)
+        except Exception:
+            logging.exception("watch_directory: poll cycle failed; continuing")
         event.wait(poll_interval)

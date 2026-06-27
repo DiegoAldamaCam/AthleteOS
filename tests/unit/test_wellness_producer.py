@@ -204,3 +204,45 @@ def test_wellness_publisher_flush_delegates_to_underlying_producer():
     publisher.flush()
 
     assert fake.flushed is True
+
+
+# --- FIX 6: envelope key-set pin + all-null roundtrip ---
+
+
+def test_build_envelope_exact_top_level_key_set():
+    """Raw envelope must have exactly these top-level keys — no more, no less."""
+    env = build_envelope(_record(), uuid_factory=lambda: _FIXED_UUID, now=lambda: _FIXED_NOW_MS)
+
+    assert set(env.keys()) == {
+        "event_id", "event_time", "ingest_time", "source", "athlete_id", "payload"
+    }
+
+
+def test_build_envelope_all_nullable_fields_none_roundtrips_json():
+    """A record with ALL nullable fields set to None must json.dumps successfully
+    and round-trip: None -> JSON null -> None."""
+    record = _record(
+        hrv=None,
+        sleep_hours=None,
+        resting_hr=None,
+        steps=None,
+        body_weight_kg=None,
+        energy=None,
+        soreness=None,
+        mood=None,
+        stress=None,
+        perceived_recovery=None,
+    )
+    env = build_envelope(record, uuid_factory=lambda: _FIXED_UUID, now=lambda: _FIXED_NOW_MS)
+
+    serialized = json.dumps(env)
+    restored = json.loads(serialized)
+
+    nullable_fields = [
+        "hrv", "sleep_hours", "resting_hr", "steps", "body_weight_kg",
+        "energy", "soreness", "mood", "stress", "perceived_recovery",
+    ]
+    for field in nullable_fields:
+        assert restored["payload"][field] is None, (
+            f"payload.{field} should round-trip as null/None"
+        )

@@ -22,6 +22,7 @@ Mirrors tests/integration/test_strength_ingestion.py structure.
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from pathlib import Path
 
@@ -63,10 +64,8 @@ def _consume_n(bootstrap_servers: str, topic: str, n: int, timeout: float = 30.0
     consumer.subscribe([topic])
     messages = []
     try:
-        from datetime import datetime
-
-        deadline = datetime.now().timestamp() + timeout
-        while len(messages) < n and datetime.now().timestamp() < deadline:
+        deadline = time.monotonic() + timeout
+        while len(messages) < n and time.monotonic() < deadline:
             msg = consumer.poll(1.0)
             if msg is None:
                 continue
@@ -107,7 +106,10 @@ def test_csv_drop_lands_envelopes_in_raw_wellness(redpanda_endpoints, tmp_path):
         envelope = json.loads(msg.value().decode("utf-8"))
         envelopes.append(envelope)
 
-        # --- raw envelope shape ---
+        # --- raw envelope shape (exact key set) ---
+        assert set(envelope.keys()) == {
+            "event_id", "event_time", "ingest_time", "source", "athlete_id", "payload"
+        }
         assert uuid.UUID(envelope["event_id"]).version == 4
         assert envelope["source"] == "synthetic_wellness"
         assert envelope["athlete_id"] in ("A1", "A2")
