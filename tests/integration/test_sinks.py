@@ -444,7 +444,8 @@ def test_pg_and_iceberg_sinks(
     pg_rows = _pg_query(
         pg_dsn,
         "SELECT athlete_id, metric_date, acute_load, chronic_load_28d, "
-        "       chronic_load_42d, acute_chronic_ratio, deload_flag "
+        "       chronic_load_42d, acute_chronic_ratio, deload_flag, "
+        "       fatigue_score, readiness_score, coaching_flags "
         "FROM athlete_metrics "
         "WHERE athlete_id = %s "
         "ORDER BY metric_date",
@@ -462,7 +463,8 @@ def test_pg_and_iceberg_sinks(
     # Build a dict keyed by metric_date (DATE object)
     by_date: dict[date, tuple] = {}
     for row in pg_rows:
-        # row = (athlete_id, metric_date, acute_load, chronic_28d, chronic_42d, acr, deload)
+        # row = (athlete_id, metric_date, acute_load, chronic_28d, chronic_42d,
+        #         acr, deload, fatigue_score, readiness_score, coaching_flags)
         by_date[row[1]] = row
 
     # Expected day-1 date
@@ -504,6 +506,35 @@ def test_pg_and_iceberg_sinks(
     assert int(row4[6]) == 1, (
         f"day 4 deload_flag should be +1 (3 consecutive ACR>1.3), got {row4[6]}"
     )
+
+    # Scenario 19 / 21 / 22 (metrics-v2): 10-column round-trip assertions.
+    # fatigue_score and readiness_score: either float or None (NULL for new athletes).
+    for md, row in by_date.items():
+        fatigue_val = row[7]   # fatigue_score
+        readiness_val = row[8]  # readiness_score
+        flags_val = row[9]      # coaching_flags TEXT
+        # Scenario 22 (compatibility): existing 7 cols (positions 0-6) unaffected.
+        # Positions 0-6 already asserted above; spot-check type consistency.
+        assert isinstance(row[0], str), f"athlete_id must be str at {md}"
+        # Scenario 19 (atomic 10-field write): all 10 columns readable.
+        # fatigue/readiness: float or None — both valid (NULL for zero-baseline rows).
+        if fatigue_val is not None:
+            assert isinstance(float(fatigue_val), float), (
+                f"fatigue_score must be float or NULL, got {type(fatigue_val)!r} at {md}"
+            )
+        # Scenario 21 (readiness never > 80): honesty cap enforced end-to-end.
+        if readiness_val is not None:
+            assert float(readiness_val) <= 80.0, (
+                f"readiness_score MUST NOT exceed 80.0 (honesty cap violated: "
+                f"{readiness_val} at {md})"
+            )
+        # coaching_flags: TEXT (JSON) or NULL — json.loads must succeed when present.
+        if flags_val is not None:
+            import json as _json
+            parsed_flags = _json.loads(flags_val)
+            assert isinstance(parsed_flags, list), (
+                f"coaching_flags must be a JSON array, got {type(parsed_flags)!r} at {md}"
+            )
 
     # =========================================================================
     # Assertion B: UPSERT idempotency — duplicate event_id does NOT double rows

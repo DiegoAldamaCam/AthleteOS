@@ -50,6 +50,9 @@ function makeMetricRows(count = 5): MetricRow[] {
     chronic_load_42d: 85 + i * 2,
     acute_chronic_ratio: 1.1,
     deload_flag: 0 as 0 | 1,
+    fatigue_score: null,
+    readiness_score: null,
+    coaching_flags: null,
   }))
 }
 
@@ -185,6 +188,9 @@ describe('Scenario: sparse-gap — densified series preserves null gap', () => {
         chronic_load_42d: 85,
         acute_chronic_ratio: 1.1,
         deload_flag: 0,
+        fatigue_score: null,
+        readiness_score: null,
+        coaching_flags: null,
       },
       {
         athlete_id: 'A1',
@@ -194,6 +200,9 @@ describe('Scenario: sparse-gap — densified series preserves null gap', () => {
         chronic_load_42d: 87,
         acute_chronic_ratio: 1.2,
         deload_flag: 0,
+        fatigue_score: null,
+        readiness_score: null,
+        coaching_flags: null,
       },
     ]
 

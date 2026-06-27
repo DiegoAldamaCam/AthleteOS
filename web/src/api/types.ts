@@ -11,6 +11,10 @@ export interface MetricRow {
   chronic_load_42d: number | null
   acute_chronic_ratio: number | null
   deload_flag: 0 | 1 | null
+  // metrics-v2: load-based scores + coaching flags (additive, nullable)
+  fatigue_score: number | null
+  readiness_score: number | null
+  coaching_flags: string[] | null
 }
 
 export type DlqStatus = 'ok' | 'warning' | 'unavailable'
