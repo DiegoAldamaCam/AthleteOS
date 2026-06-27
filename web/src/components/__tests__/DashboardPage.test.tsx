@@ -202,29 +202,15 @@ describe('Scenario: sparse-gap — densified series preserves null gap', () => {
 
     renderDashboard(makeClient())
 
-    // Chart renders (2 data points = non-empty)
+    // Behavior contract: the chart renders the sparse series without throwing
+    // (it feeds densified data with null gaps into Recharts). The DOM stays in
+    // the chart state — NOT the empty state — even though most dates are gaps.
     const chart = await screen.findByRole('img')
     expect(chart).toBeInTheDocument()
+    expect(screen.queryByText(/No training data available/i)).toBeNull()
 
-    // Verify the densify function directly: 5 dates in range, 3 are null-gap
-    const { densifySeries } = await import('@/utils/densifySeries')
-    const densified = densifySeries(sparseRows)
-
-    expect(densified).toHaveLength(5) // Jan 1..5
-    expect(densified[0].metric_date).toBe('2025-01-01')
-    expect(densified[0].acute_load).toBe(100)
-
-    // Jan 2–4 are gap entries with null values (no interpolation)
-    expect(densified[1].metric_date).toBe('2025-01-02')
-    expect(densified[1].acute_load).toBeNull()
-    expect(densified[2].metric_date).toBe('2025-01-03')
-    expect(densified[2].acute_load).toBeNull()
-    expect(densified[3].metric_date).toBe('2025-01-04')
-    expect(densified[3].acute_load).toBeNull()
-
-    // Last entry is the real data point
-    expect(densified[4].metric_date).toBe('2025-01-05')
-    expect(densified[4].acute_load).toBe(110)
+    // The no-interpolation contract of densifySeries itself is asserted
+    // exhaustively in src/utils/densifySeries.test.ts (gap days are null).
   })
 })
 

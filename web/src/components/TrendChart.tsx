@@ -17,18 +17,13 @@ interface TrendChartProps {
   data: MetricRow[]
 }
 
-// ACR zone upper bounds for ReferenceArea y-bands
-const ACR_SAFE_MAX = 1.3
-const ACR_CAUTION_MAX = 1.5
-
-// Convert ACR ratio thresholds to approximate load-axis values.
-// We shade by y-bands on the load axis using constant horizontal bands that
-// represent typical load ranges. Because Recharts ReferenceArea on the load
-// (left) y-axis cannot natively encode a second axis ratio band, we use a
-// simple approach: shade the chart background in three stacked horizontal
-// bands keyed by load value approximations. For the ratio zone visualization,
-// we add ratio bands as overlapping ReferenceArea elements with low opacity.
-// The deload marker uses ReferenceLine on the date when deload_flag == 1.
+// ACR (acute:chronic ratio) zone thresholds. These are dimensionless ratios,
+// NOT load values, so they are shaded on a dedicated right-hand ratio axis
+// ("acr"), never on the load axis. Mixing ratio thresholds with load units
+// would produce meaningless bands.
+const ACR_SAFE_MAX = 1.3 // ratio < 1.3  → safe
+const ACR_CAUTION_MAX = 1.5 // 1.3–1.5    → caution; > 1.5 → danger
+const ACR_AXIS_MAX = 2.0 // top of the ratio axis for zone shading
 
 export default function TrendChart({ data }: TrendChartProps) {
   const densified = densifySeries(data)
@@ -38,8 +33,11 @@ export default function TrendChart({ data }: TrendChartProps) {
     .filter((r) => r.deload_flag === 1)
     .map((r) => r.metric_date)
 
-  // Determine y-axis domain
-  const loadsAll = data.flatMap((r) => [r.acute_load, r.chronic_load_28d])
+  // Determine y-axis domain. Nullable load fields (day-1 rows) are excluded so
+  // a single null does not poison Math.max into NaN.
+  const loadsAll = data
+    .flatMap((r) => [r.acute_load, r.chronic_load_28d])
+    .filter((v): v is number => v !== null)
   const maxLoad = loadsAll.length > 0 ? Math.ceil(Math.max(...loadsAll) * 1.1) : 200
   const minLoad = 0
 
@@ -61,35 +59,47 @@ export default function TrendChart({ data }: TrendChartProps) {
             tick={{ fontSize: 12 }}
           />
           <YAxis
+            yAxisId="load"
             domain={[minLoad, maxLoad]}
             label={{ value: 'Load (AU)', angle: -90, position: 'insideLeft' }}
+            tick={{ fontSize: 12 }}
+          />
+          <YAxis
+            yAxisId="acr"
+            orientation="right"
+            domain={[0, ACR_AXIS_MAX]}
+            label={{ value: 'ACR', angle: 90, position: 'insideRight' }}
             tick={{ fontSize: 12 }}
           />
 
           <Tooltip />
           <Legend />
 
-          {/* ACR zone shading — safe (<1.3), caution (1.3-1.5), danger (>1.5) */}
-          {/* Shaded as y-bands across the chart. Values approximate load ranges. */}
+          {/* ACR zone shading on the ratio axis — safe (<1.3), caution (1.3-1.5),
+              danger (>1.5). These bands are in ratio units, so the thresholds map
+              directly onto the "acr" axis. */}
           <ReferenceArea
+            yAxisId="acr"
             y1={0}
-            y2={maxLoad * ACR_SAFE_MAX / 2}
+            y2={ACR_SAFE_MAX}
             fill="#22c55e"
-            fillOpacity={0.05}
+            fillOpacity={0.06}
             label={{ value: 'Safe', position: 'insideTopLeft', fontSize: 10 }}
           />
           <ReferenceArea
-            y1={maxLoad * ACR_SAFE_MAX / 2}
-            y2={maxLoad * ACR_CAUTION_MAX / 2}
+            yAxisId="acr"
+            y1={ACR_SAFE_MAX}
+            y2={ACR_CAUTION_MAX}
             fill="#f59e0b"
-            fillOpacity={0.08}
+            fillOpacity={0.1}
             label={{ value: 'Caution', position: 'insideTopLeft', fontSize: 10 }}
           />
           <ReferenceArea
-            y1={maxLoad * ACR_CAUTION_MAX / 2}
-            y2={maxLoad}
+            yAxisId="acr"
+            y1={ACR_CAUTION_MAX}
+            y2={ACR_AXIS_MAX}
             fill="#ef4444"
-            fillOpacity={0.08}
+            fillOpacity={0.1}
             label={{ value: 'Danger', position: 'insideTopLeft', fontSize: 10 }}
           />
 
@@ -97,6 +107,7 @@ export default function TrendChart({ data }: TrendChartProps) {
           {deloadDates.map((date) => (
             <ReferenceLine
               key={`deload-${date}`}
+              yAxisId="load"
               x={date}
               stroke="#8b5cf6"
               strokeDasharray="4 2"
@@ -104,8 +115,11 @@ export default function TrendChart({ data }: TrendChartProps) {
             />
           ))}
 
-          {/* Trend lines — connectNulls=false (default) renders visible gap for sparse dates */}
+          {/* Trend lines — connectNulls={false} renders a visible gap for sparse
+              dates (densifySeries injects null for missing days). Removing this
+              prop would interpolate across gaps, which the spec forbids. */}
           <Line
+            yAxisId="load"
             type="monotone"
             dataKey="acute_load"
             name="Acute Load"
@@ -115,11 +129,22 @@ export default function TrendChart({ data }: TrendChartProps) {
             connectNulls={false}
           />
           <Line
+            yAxisId="load"
             type="monotone"
             dataKey="chronic_load_28d"
             name="Chronic Load (28d)"
             stroke="#16a34a"
             strokeWidth={2}
+            dot={false}
+            connectNulls={false}
+          />
+          <Line
+            yAxisId="acr"
+            type="monotone"
+            dataKey="acute_chronic_ratio"
+            name="ACR"
+            stroke="#7c3aed"
+            strokeWidth={1.5}
             dot={false}
             connectNulls={false}
           />
