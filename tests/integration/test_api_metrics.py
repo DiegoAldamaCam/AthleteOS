@@ -1,7 +1,8 @@
-"""Integration tests for GET /athletes/{id}/metrics — Domain A (7 scenarios).
+"""Integration tests for GET /athletes/{id}/metrics — Domain A (7 scenarios) + Slice D.
 
 Spec source: obs #65 (sdd/athleteos-phase7-web/spec), Domain A.
 Design source: obs #66 (sdd/athleteos-phase7-web/design), Backend Design.
+Hardening spec: obs #98 (sdd/athleteos-hardening/spec), Slice D.
 
 Uses a throwaway PostgresContainer seeded with `athlete_metrics` rows.
 The FastAPI app is tested via httpx.AsyncClient (ASGI transport) so no real
@@ -11,18 +12,22 @@ Docker-gated: skipped automatically when Docker daemon is not reachable.
 
 All 7 spec scenarios covered:
   S1  Happy path — range with data (10 rows, ascending order)
-  S2  Default range — last 90 days (no from/to supplied)
+  S2  Default range — last 90 days (no from/to supplied) — TIGHTENED (Item 14)
   S3  Athlete exists, no rows in range → 200 []
   S4  Sparse series — 2 rows with gap (no date fill)
   S5  Unknown athlete → 404
   S6  Invalid date format → 422
   S7  from > to → 422
+
+Slice D additions (Items 13, 14):
+  D1  NULL-field serialization — acute_chronic_ratio=NULL + deload_flag=NULL → JSON null
+  D2  Exact 90-day boundary — boundary row included; from = today_utc - 90 days (exact)
 """
 
 from __future__ import annotations
 
 import os
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Generator
 
 import psycopg2
@@ -115,6 +120,25 @@ def _insert_row(conn, athlete_id: str, metric_date: date, acute_load: float = 10
         )
 
 
+def _insert_row_with_nulls(conn, athlete_id: str, metric_date: date) -> None:
+    """Insert a row where acute_chronic_ratio and deload_flag are explicitly NULL.
+
+    Used by Item 13 (Slice D): verify the API serializes NULL optional fields as
+    JSON null — not 0, not omitted.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO athlete_metrics
+                (athlete_id, metric_date, acute_load, chronic_load_28d, chronic_load_42d,
+                 acute_chronic_ratio, deload_flag)
+            VALUES (%s, %s, %s, %s, %s, NULL, NULL)
+            ON CONFLICT (athlete_id, metric_date) DO NOTHING
+            """,
+            (athlete_id, metric_date, 80.0, 72.0, 68.0),
+        )
+
+
 @pytest.fixture(scope="module")
 def seeded_db(pg_conn) -> dict:
     """Seed athlete_metrics and return metadata for assertions."""
@@ -131,7 +155,23 @@ def seeded_db(pg_conn) -> dict:
     recent_date = date.today() - timedelta(days=10)
     _insert_row(pg_conn, "A3", recent_date)
 
-    return {"happy_athlete": "A1", "sparse_athlete": "A2", "recent_athlete": "A3"}
+    # D1 (Item 13) NULL-field athlete: A4 — one row with acute_chronic_ratio=NULL and deload_flag=NULL
+    null_date = date(2025, 2, 1)
+    _insert_row_with_nulls(pg_conn, "A4", null_date)
+
+    # D2 (Item 14) exact boundary athlete: A5 — one row exactly at today_utc - 90 days
+    boundary_date = datetime.now(timezone.utc).date() - timedelta(days=90)
+    _insert_row(pg_conn, "A5", boundary_date)
+
+    return {
+        "happy_athlete": "A1",
+        "sparse_athlete": "A2",
+        "recent_athlete": "A3",
+        "null_athlete": "A4",
+        "null_date": null_date,
+        "boundary_athlete": "A5",
+        "boundary_date": boundary_date,
+    }
 
 
 @pytest.fixture(scope="module")
@@ -207,17 +247,21 @@ def test_happy_path_returns_10_rows_in_order(api_client, seeded_db):
 
 
 def test_default_range_returns_rows_within_90_days(api_client, seeded_db):
-    """S2: No from/to supplied → rows within last 90 days, 200 response."""
+    """S2 + D2: No from/to supplied → rows within last 90 days, 200 response.
+
+    TIGHTENED (Item 14): uses datetime.now(timezone.utc).date() — same clock as
+    the endpoint — to compute the cutoff, not date.today() (which is local-TZ).
+    """
     resp = api_client.get("/athletes/A3/metrics")
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) >= 1
-    # All returned dates must be within last 90 days
-    today = date.today()
-    cutoff = today - timedelta(days=90)
+    # All returned dates must be within last 90 days (UTC clock matches endpoint)
+    today_utc = datetime.now(timezone.utc).date()
+    cutoff = today_utc - timedelta(days=90)
     for row in data:
         row_date = date.fromisoformat(row["metric_date"])
-        assert cutoff <= row_date <= today, f"Date {row_date} outside default 90d window"
+        assert cutoff <= row_date <= today_utc, f"Date {row_date} outside default 90d window"
 
 
 # ---------------------------------------------------------------------------
@@ -285,3 +329,66 @@ def test_from_after_to_returns_422(api_client):
     assert resp.status_code == 422
     body = resp.json()
     assert "detail" in body, f"Expected 'detail' key in 422 body, got: {body}"
+
+
+# ---------------------------------------------------------------------------
+# D1 (Item 13) — NULL-field serialization: acute_chronic_ratio=NULL + deload_flag=NULL
+# ---------------------------------------------------------------------------
+
+
+def test_null_optional_fields_serialize_as_json_null(api_client, seeded_db):
+    """D1: Row seeded with acute_chronic_ratio=NULL and deload_flag=NULL must appear
+    in the response with those fields as JSON null — not 0, not absent.
+
+    Spec: obs #98 Slice D — NULL-Field Metrics Serialization requirement.
+    """
+    null_date = seeded_db["null_date"]
+    date_str = null_date.isoformat()
+    resp = api_client.get(f"/athletes/A4/metrics?from={date_str}&to={date_str}")
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    data = resp.json()
+    assert len(data) == 1, f"Expected exactly 1 row for A4 on {date_str}, got {len(data)}: {data}"
+
+    row = data[0]
+
+    # Field must be PRESENT and its value must be JSON null (None in Python)
+    assert "acute_chronic_ratio" in row, "acute_chronic_ratio field must be present in response"
+    assert row["acute_chronic_ratio"] is None, (
+        f"Expected acute_chronic_ratio=null, got {row['acute_chronic_ratio']!r} "
+        "(must not be 0 or omitted)"
+    )
+
+    assert "deload_flag" in row, "deload_flag field must be present in response"
+    assert row["deload_flag"] is None, (
+        f"Expected deload_flag=null, got {row['deload_flag']!r} "
+        "(must not be 0 or omitted)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# D2 (Item 14) — Exact 90-day boundary: boundary row included (new additive test)
+# ---------------------------------------------------------------------------
+
+
+def test_exact_90_day_boundary_row_is_included(api_client, seeded_db):
+    """D2 exact-boundary: athlete A5 has exactly one row at today_utc - 90 days.
+
+    That row MUST appear in the default-range response (inclusive boundary).
+    This proves the endpoint uses 'from = today_utc - 90 days' (exact cutoff date),
+    not 'today_utc - 89 days' or any off-by-one variant.
+
+    Spec: obs #98 Slice D — Scenario 'Boundary is inclusive — row on cutoff date is included'.
+    """
+    boundary_date = seeded_db["boundary_date"]  # datetime.now(timezone.utc).date() - 90 days
+    resp = api_client.get("/athletes/A5/metrics")
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    data = resp.json()
+    assert len(data) >= 1, (
+        f"Expected A5's boundary row (seeded at {boundary_date}) to appear in default-range "
+        f"response, but got 0 rows. The endpoint may be using an off-by-one cutoff."
+    )
+    returned_dates = [date.fromisoformat(row["metric_date"]) for row in data]
+    assert boundary_date in returned_dates, (
+        f"Boundary date {boundary_date} not found in returned dates {returned_dates}. "
+        "The endpoint must include rows where metric_date == today_utc - 90 days (inclusive)."
+    )

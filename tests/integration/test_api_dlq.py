@@ -1,8 +1,9 @@
-"""Integration tests for GET /pipeline/dlq-depth — Domain B (4 scenarios).
+"""Integration tests for GET /pipeline/dlq-depth — Domain B (4 scenarios) + Slice D.
 
 Spec source: obs #65 (sdd/athleteos-phase7-web/spec), Domain B.
 Design source: obs #66 (sdd/athleteos-phase7-web/design), DLQ endpoint section.
 Decision source: obs #68 — lazy module-singleton AdminClient, degrade to 200.
+Hardening spec: obs #98 (sdd/athleteos-hardening/spec), Slice D — Item 15.
 
 Uses a RedpandaContainer for broker-reachable scenarios. The stopped-broker
 scenario stops the container and calls the endpoint, asserting the degraded
@@ -15,6 +16,9 @@ All 4 spec scenarios covered (Domain B):
   S2  All DLQs empty — all depths 0, all status="ok"
   S3  Kafka unreachable — HTTP 200 degraded (broker_reachable:false)
   S4  Partial topic failure — non-existent topic → depth 0, status="ok"
+
+Slice D addition (Item 15):
+  D1  Exact-depth arithmetic — known N messages produced → depth == N (exact equality)
 """
 
 from __future__ import annotations
@@ -297,3 +301,97 @@ def test_kafka_unreachable_returns_200_degraded_envelope(stopped_broker_client):
     for topic_entry in body["topics"]:
         assert topic_entry["depth"] is None, f"Expected depth=null when broker is down, got {topic_entry['depth']}"
         assert topic_entry["status"] == "unavailable", f"Expected status='unavailable', got {topic_entry['status']}"
+
+
+# ---------------------------------------------------------------------------
+# D1 — Exact-depth arithmetic (Slice D, Item 15)
+# ---------------------------------------------------------------------------
+
+_EXACT_DEPTH_N = 7
+_EXACT_DEPTH_TOPIC = "dlq.canonical.training_event"
+
+
+def test_exact_depth_arithmetic_equals_produced_count(redpanda_api_client, redpanda_bootstrap):
+    """D1 (Item 15): Produce N known messages; depth reported must equal N exactly (no range).
+
+    Spec: obs #98 Slice D — Requirement: Exact DLQ Depth Arithmetic Test.
+    Scenario: Depth equals exactly produced message count.
+
+    Because Redpanda offsets accumulate across tests within this module, we
+    snapshot the current depth for the target topic *before* producing, then
+    produce exactly _EXACT_DEPTH_N messages and assert the new depth equals
+    (pre_depth + _EXACT_DEPTH_N).  This exercises the exact-equality arithmetic
+    contract without relying on test-execution order or topic isolation.
+
+    NOTE: This test runs after S3 (stopped_broker_client), whose teardown reloads
+    api modules back to the restored env.  We explicitly force-reset the singleton
+    AND re-point the singleton's bootstrap to the live Redpanda container so the
+    API endpoint does not accidentally use a stale broken bootstrap address.
+    """
+    _create_topics(redpanda_bootstrap, _DLQ_TOPICS)
+
+    # Re-point the api modules at the live Redpanda container. The stopped_broker
+    # fixture teardown calls _reload_api_modules() which may leave modules in an
+    # inconsistent state when the original redpanda_api_client app object still
+    # references the pre-teardown router. Force a clean reset here.
+    os.environ["KAFKA_BOOTSTRAP_SERVERS"] = redpanda_bootstrap
+    _reload_api_modules()
+
+    # Clear the admin-client singleton so the API builds a new one pointing to
+    # the live Redpanda container.
+    try:
+        import api.kafka_admin as _ka
+        _ka._admin_client_singleton = None  # noqa: SLF001
+    except (ImportError, AttributeError):
+        pass
+
+    time.sleep(0.3)  # allow Redpanda to settle after topic creation
+
+    # --- Snapshot pre-produce depth ---
+    resp_before = redpanda_api_client.get("/pipeline/dlq-depth")
+    assert resp_before.status_code == 200, f"Pre-produce GET failed: {resp_before.status_code} {resp_before.text}"
+    body_before = resp_before.json()
+    assert body_before["broker_reachable"] is True, (
+        f"Pre-produce broker_reachable=False (bootstrap={redpanda_bootstrap}); "
+        f"body={body_before}"
+    )
+
+    training_before = next(
+        (t for t in body_before["topics"] if t["topic"] == _EXACT_DEPTH_TOPIC),
+        None,
+    )
+    assert training_before is not None, f"{_EXACT_DEPTH_TOPIC} missing from pre-produce response"
+    pre_depth: int = training_before["depth"]
+    assert isinstance(pre_depth, int), f"Pre-produce depth must be an integer, got {type(pre_depth)}"
+
+    # --- Produce exactly N messages ---
+    _produce_messages(redpanda_bootstrap, _EXACT_DEPTH_TOPIC, _EXACT_DEPTH_N)
+    time.sleep(0.5)  # allow Redpanda to commit the new offsets
+
+    # Reset singleton again so the API re-reads end offsets from the broker.
+    try:
+        import api.kafka_admin as _ka
+        _ka._admin_client_singleton = None  # noqa: SLF001
+    except (ImportError, AttributeError):
+        pass
+
+    # --- Assert exact arithmetic ---
+    resp_after = redpanda_api_client.get("/pipeline/dlq-depth")
+    assert resp_after.status_code == 200
+    body_after = resp_after.json()
+    assert body_after["broker_reachable"] is True
+
+    training_after = next(
+        (t for t in body_after["topics"] if t["topic"] == _EXACT_DEPTH_TOPIC),
+        None,
+    )
+    assert training_after is not None, f"{_EXACT_DEPTH_TOPIC} missing from post-produce response"
+
+    expected_depth = pre_depth + _EXACT_DEPTH_N
+    assert training_after["depth"] == expected_depth, (
+        f"Exact-depth arithmetic failed: pre_depth={pre_depth}, produced={_EXACT_DEPTH_N}, "
+        f"expected depth=={expected_depth}, got {training_after['depth']}"
+    )
+    assert training_after["status"] == "warning", (
+        f"Expected status='warning' for depth {expected_depth}, got {training_after['status']}"
+    )
