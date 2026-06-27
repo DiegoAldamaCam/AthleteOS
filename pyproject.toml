@@ -29,6 +29,15 @@ dependencies = [
   "fastavro>=1.9,<2",
   "psycopg2-binary>=2.9,<3",
   "duckdb>=0.10,<1",
+  # Iceberg analytical sink (work-unit 6.2, PR5).
+  # Upper-bounded to <0.8 because:
+  #   - 0.7.x is the first version with partitioned-table write support.
+  #   - 0.8+ requires pyarrow>=14, which conflicts with
+  #     apache-beam 2.48.0 (transitive dep of apache-flink 1.19) that
+  #     pins pyarrow<12.0.0.  This constraint is the pinning ceiling.
+  # The [pyarrow,sql-sqlite] extras add pyarrow (already installed) and
+  # SQLAlchemy for the local SqlCatalog backed by sqlite (no Hadoop JARs).
+  "pyiceberg[pyarrow,sql-sqlite]>=0.7.1,<0.8",
   # UI/API deps keep a floor only; minor bumps here are low-risk for this slice.
   "fastapi>=0.110",
   "uvicorn[standard]>=0.29",
