@@ -2,6 +2,7 @@ import { useMetrics } from '@/hooks/useMetrics'
 import { useDlqDepth } from '@/hooks/useDlqDepth'
 import TrendChart from './TrendChart'
 import PipelineHealthPanel from './PipelineHealthPanel'
+import CoachingFlagsPanel from './CoachingFlagsPanel'
 import Loading from './states/Loading'
 import ErrorAlert from './states/ErrorAlert'
 import Empty from './states/Empty'
@@ -31,7 +32,24 @@ export default function DashboardPage() {
   } else if (!metrics.data || metrics.data.length === 0) {
     metricsPanel = <Empty />
   } else {
-    metricsPanel = <TrendChart data={metrics.data} />
+    // Show the most recent row's v2 scores + flags above the chart.
+    const latestRow = metrics.data[metrics.data.length - 1]
+    metricsPanel = (
+      <>
+        {latestRow && (
+          <div aria-label="Latest load scores">
+            {latestRow.fatigue_score !== null && (
+              <p>Fatigue score: {latestRow.fatigue_score.toFixed(1)}</p>
+            )}
+            {latestRow.readiness_score !== null && (
+              <p>Readiness score: {latestRow.readiness_score.toFixed(1)}</p>
+            )}
+            <CoachingFlagsPanel coaching_flags={latestRow.coaching_flags} />
+          </div>
+        )}
+        <TrendChart data={metrics.data} />
+      </>
+    )
   }
 
   // DLQ panel: ALWAYS rendered regardless of metrics state.

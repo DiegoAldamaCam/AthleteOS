@@ -39,7 +39,10 @@ from jobs.metrics.compute import (
     acute_load,
     build_metrics_dlq_envelope,
     chronic_load,
+    compute_coaching_flags,
     compute_deload_flags,
+    compute_fatigue_score,
+    compute_readiness_score,
     compute_rolling_metrics,
     is_finite_load,
     metrics_row_to_json,
@@ -603,3 +606,230 @@ class TestMetricsRowToJson:
         parsed = json.loads(result)  # raises json.JSONDecodeError if invalid
         assert parsed["deload_flag"] == 1
         assert parsed["metric_date"] == 1_000_000_000_000
+
+    # FIX 3: v2 fields (fatigue_score, readiness_score, coaching_flags) in JSON output.
+    def test_v2_fields_included_in_json(self):
+        """FIX 3: metrics_row_to_json must include fatigue_score, readiness_score,
+        coaching_flags in the JSON output (Kafka staging topic matches PG schema)."""
+        result = metrics_row_to_json(
+            athlete_id="ath-v2",
+            metric_date=1_700_000_000_000,
+            acute_load_val=200.0,
+            chronic_load_28d_val=100.0,
+            chronic_load_42d_val=100.0,
+            acr_val=2.0,
+            deload_flag=1,
+            fatigue_score_val=40.0,
+            readiness_score_val=30.0,
+            coaching_flags_val=["deload", "monitor"],
+        )
+        parsed = json.loads(result)
+        assert "fatigue_score" in parsed, "fatigue_score missing from JSON output"
+        assert "readiness_score" in parsed, "readiness_score missing from JSON output"
+        assert "coaching_flags" in parsed, "coaching_flags missing from JSON output"
+        assert parsed["fatigue_score"] == pytest.approx(40.0)
+        assert parsed["readiness_score"] == pytest.approx(30.0)
+        assert parsed["coaching_flags"] == ["deload", "monitor"]
+
+    def test_v2_nan_fatigue_score_becomes_null(self):
+        """FIX 3: NaN fatigue_score must serialize as null (not raise ValueError)."""
+        result = metrics_row_to_json(
+            athlete_id="ath-v2b",
+            metric_date=1_700_000_000_000,
+            acute_load_val=100.0,
+            chronic_load_28d_val=100.0,
+            chronic_load_42d_val=100.0,
+            acr_val=1.0,
+            deload_flag=0,
+            fatigue_score_val=float("nan"),
+            readiness_score_val=None,
+            coaching_flags_val=[],
+        )
+        parsed = json.loads(result)
+        assert parsed["fatigue_score"] is None, (
+            f"NaN fatigue_score must become null, got {parsed['fatigue_score']!r}"
+        )
+        assert parsed["readiness_score"] is None
+        assert parsed["coaching_flags"] == []
+
+    def test_v2_none_scores_become_null(self):
+        """FIX 3: None fatigue/readiness scores serialize as null."""
+        result = metrics_row_to_json(
+            athlete_id="ath-v2c",
+            metric_date=1_700_000_000_000,
+            acute_load_val=0.0,
+            chronic_load_28d_val=0.0,
+            chronic_load_42d_val=0.0,
+            acr_val=None,
+            deload_flag=0,
+            fatigue_score_val=None,
+            readiness_score_val=None,
+            coaching_flags_val=[],
+        )
+        parsed = json.loads(result)
+        assert parsed["fatigue_score"] is None
+        assert parsed["readiness_score"] is None
+
+
+# ---------------------------------------------------------------------------
+# compute_fatigue_score (metrics-v2, Scenarios 1-4)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeFatigueScore:
+    """Scenario 1-4: fatigue_score = clamp(acute / max(chronic42,1), 0, 5) * 20."""
+
+    def test_scenario_1_standard_computation(self):
+        # Sc 1: acute=100, chronic_42d=50 -> ratio=2.0, clamped=2.0, *20=40.0
+        assert compute_fatigue_score(100.0, 50.0) == pytest.approx(40.0)
+
+    def test_scenario_2_chronic_zero_returns_none(self):
+        # Sc 2: chronic_load_42d==0 -> NULL guard -> None
+        assert compute_fatigue_score(100.0, 0.0) is None
+
+    def test_scenario_3_saturation_ceiling(self):
+        # Sc 3: acute=600, chronic_42d=100 -> ratio=6 > clamp ceiling of 5 -> 5*20=100.0
+        assert compute_fatigue_score(600.0, 100.0) == pytest.approx(100.0)
+
+    def test_scenario_4_zero_acute_load(self):
+        # Sc 4: acute=0, chronic_42d=80 -> ratio=0 -> 0*20=0.0
+        assert compute_fatigue_score(0.0, 80.0) == pytest.approx(0.0)
+
+    def test_triangulation_moderate_ratio(self):
+        # Triangulation: ratio=1.0 (100/100) -> 1.0*20=20.0
+        assert compute_fatigue_score(100.0, 100.0) == pytest.approx(20.0)
+
+    def test_triangulation_max_clamp_boundary(self):
+        # ratio exactly 5 (at ceiling): 250/50 -> 5*20=100.0 (boundary, not exceeded)
+        assert compute_fatigue_score(250.0, 50.0) == pytest.approx(100.0)
+
+    # FIX 2: NaN guard — NaN inputs must return None, not propagate NaN.
+    def test_chronic_load_42d_nan_returns_none(self):
+        # NaN chronic_load_42d must return None (not nan) — FIX 2.
+        result = compute_fatigue_score(100.0, float("nan"))
+        assert result is None, f"Expected None for NaN chronic_load_42d, got {result!r}"
+
+    def test_acute_load_nan_returns_none(self):
+        # NaN acute_load must return None (not nan) — FIX 2.
+        result = compute_fatigue_score(float("nan"), 50.0)
+        assert result is None, f"Expected None for NaN acute_load, got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# compute_readiness_score (metrics-v2, Scenarios 5-11)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeReadinessScore:
+    """Scenario 5-11: readiness_score piecewise ACR zones, capped at 80.0."""
+
+    def test_scenario_5_optimal_acr_1_0(self):
+        # Sc 5: acr=1.0, chronic_28d=50 -> zone <=1.0: 60+(0.2/0.2)*20=80.0
+        assert compute_readiness_score(1.0, 50.0) == pytest.approx(80.0)
+
+    def test_scenario_6_acr_boundary_0_8(self):
+        # Sc 6: acr=0.8, chronic_28d=50 -> zone <=0.8: 40+(0.8/0.8)*20=60.0
+        assert compute_readiness_score(0.8, 50.0) == pytest.approx(60.0)
+
+    def test_scenario_7_acr_boundary_1_3(self):
+        # Sc 7: acr=1.3, chronic_28d=50 -> zone <=1.3: 80-(0.3/0.3)*20=60.0
+        assert compute_readiness_score(1.3, 50.0) == pytest.approx(60.0)
+
+    def test_scenario_8_chronic_zero_returns_none(self):
+        # Sc 8: chronic_load_28d==0 -> NULL guard -> None
+        assert compute_readiness_score(1.0, 0.0) is None
+
+    def test_scenario_8_acr_none_returns_none(self):
+        # Sc 8 variant: acr=None -> None
+        assert compute_readiness_score(None, 50.0) is None
+
+    def test_scenario_9_readiness_never_exceeds_80(self):
+        # Sc 9 invariant: ACR sweep 0..3 step 0.01 — no value > 80.0 AND no value < 0.0
+        import math
+        for acr_i in range(0, 301):
+            acr = acr_i / 100.0
+            result = compute_readiness_score(acr, 100.0)
+            assert result is not None
+            assert result <= 80.0, f"readiness_score exceeded 80.0 at acr={acr}: {result}"
+            # FIX 6a: lower bound — readiness score must never be negative
+            assert result >= 0.0, f"readiness_score below 0.0 at acr={acr}: {result}"
+
+    def test_scenario_10_high_load_zone_descent(self):
+        # Sc 10: acr=2.0, chronic_28d=50
+        # zone >1.3: max(0, 60-((2.0-1.3)/0.7)*60)=max(0,60-60)=0.0
+        assert compute_readiness_score(2.0, 50.0) == pytest.approx(0.0)
+
+    def test_scenario_11_undertrained_minimum(self):
+        # Sc 11: acr=0.0, chronic_28d=50 -> zone <=0.8: 40+(0.0/0.8)*20=40.0
+        assert compute_readiness_score(0.0, 50.0) == pytest.approx(40.0)
+
+    def test_triangulation_undertrained_midpoint(self):
+        # acr=0.4 -> zone <=0.8: 40+(0.4/0.8)*20=40+10=50.0
+        assert compute_readiness_score(0.4, 50.0) == pytest.approx(50.0)
+
+    def test_triangulation_high_load_clamp_to_zero(self):
+        # acr=3.0 (way into danger zone): max(0, 60-((3.0-1.3)/0.7)*60)=max(0,60-145.7)<0 -> 0.0
+        result = compute_readiness_score(3.0, 50.0)
+        assert result == pytest.approx(0.0)
+
+    # FIX 2: NaN guard — NaN inputs must return None, not propagate NaN.
+    def test_acr_nan_returns_none(self):
+        # NaN acr must return None — FIX 2.
+        result = compute_readiness_score(float("nan"), 100.0)
+        assert result is None, f"Expected None for NaN acr, got {result!r}"
+
+    def test_chronic_load_28d_nan_returns_none(self):
+        # NaN chronic_load_28d must return None — FIX 2.
+        result = compute_readiness_score(1.0, float("nan"))
+        assert result is None, f"Expected None for NaN chronic_load_28d, got {result!r}"
+
+
+# ---------------------------------------------------------------------------
+# compute_coaching_flags (metrics-v2, Scenarios 12-16)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeCoachingFlags:
+    """Scenarios 12-16: coaching_flags derivation from deload_flag and fatigue_score."""
+
+    def test_scenario_12_single_deload_flag(self):
+        # Sc 12: deload=1, fatigue=50 -> ["deload"]
+        assert compute_coaching_flags(1, 50.0, None) == ["deload"]
+
+    def test_scenario_13_multiple_flags_simultaneously(self):
+        # Sc 13: deload=1, fatigue=85 -> ["deload","high_fatigue"]
+        assert compute_coaching_flags(1, 85.0, None) == ["deload", "high_fatigue"]
+
+    def test_scenario_14_empty_array_when_no_flags(self):
+        # Sc 14: deload=0, fatigue=55 -> []
+        assert compute_coaching_flags(0, 55.0, None) == []
+
+    def test_scenario_15_monitor_flag_at_lower_boundary(self):
+        # Sc 15: deload=0, fatigue=70.0 -> ["monitor"] (70 <= f < 80)
+        assert compute_coaching_flags(0, 70.0, None) == ["monitor"]
+
+    def test_scenario_16_high_fatigue_at_exact_boundary(self):
+        # Sc 16: deload=0, fatigue=80.0 -> ["high_fatigue"] NOT ["monitor"]
+        result = compute_coaching_flags(0, 80.0, None)
+        assert result == ["high_fatigue"], (
+            f"fatigue=80.0 must produce ['high_fatigue'] (>= FATIGUE_HIGH=80), "
+            f"not ['monitor'] (70<=f<80). Got: {result}"
+        )
+
+    def test_undertrained_flag(self):
+        # deload=-1 -> "undertrained"
+        assert compute_coaching_flags(-1, 55.0, None) == ["undertrained"]
+
+    def test_none_fatigue_no_fatigue_flags(self):
+        # fatigue_score=None -> no high_fatigue, no monitor
+        assert compute_coaching_flags(0, None, None) == []
+
+    def test_triangulation_deload_and_monitor(self):
+        # deload=1, fatigue=75 -> ["deload","monitor"]
+        assert compute_coaching_flags(1, 75.0, None) == ["deload", "monitor"]
+
+    def test_triangulation_high_fatigue_above_boundary(self):
+        # fatigue=95 -> high_fatigue
+        result = compute_coaching_flags(0, 95.0, None)
+        assert result == ["high_fatigue"]
+        assert "monitor" not in result, "high_fatigue and monitor must be mutually exclusive"

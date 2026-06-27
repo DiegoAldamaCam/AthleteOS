@@ -50,6 +50,9 @@ function makeMetricRows(count = 5): MetricRow[] {
     chronic_load_42d: 85 + i * 2,
     acute_chronic_ratio: 1.1,
     deload_flag: 0 as 0 | 1,
+    fatigue_score: null,
+    readiness_score: null,
+    coaching_flags: null,
   }))
 }
 
@@ -185,6 +188,9 @@ describe('Scenario: sparse-gap — densified series preserves null gap', () => {
         chronic_load_42d: 85,
         acute_chronic_ratio: 1.1,
         deload_flag: 0,
+        fatigue_score: null,
+        readiness_score: null,
+        coaching_flags: null,
       },
       {
         athlete_id: 'A1',
@@ -194,6 +200,9 @@ describe('Scenario: sparse-gap — densified series preserves null gap', () => {
         chronic_load_42d: 87,
         acute_chronic_ratio: 1.2,
         deload_flag: 0,
+        fatigue_score: null,
+        readiness_score: null,
+        coaching_flags: null,
       },
     ]
 
@@ -276,5 +285,42 @@ describe('Scenario: dlq-broker-unreachable', () => {
 
     // No numeric depth shown
     expect(screen.queryByText(/Warning:/i)).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// FIX 5: Non-null v2 scores + coaching flag rendered in DashboardPage
+// ---------------------------------------------------------------------------
+describe('Scenario: metrics-v2 scores and coaching flags visible', () => {
+  it('renders fatigue_score, readiness_score, and coaching badge when all non-null', async () => {
+    // Only the LAST row's scores are displayed (latestRow = data[data.length-1]).
+    const rows: MetricRow[] = [
+      {
+        athlete_id: 'A1',
+        metric_date: '2025-01-01',
+        acute_load: 100,
+        chronic_load_28d: 90,
+        chronic_load_42d: 85,
+        acute_chronic_ratio: 1.1,
+        deload_flag: 0 as 0 | 1,
+        fatigue_score: 45.0,
+        readiness_score: 72.3,
+        coaching_flags: ['monitor'],
+      },
+    ]
+
+    mockFetchMetrics.mockResolvedValue(rows)
+    mockFetchDlqDepth.mockResolvedValue(makeDlqOk())
+
+    renderDashboard(makeClient())
+
+    // Fatigue score label
+    await screen.findByText('Fatigue score: 45.0')
+
+    // Readiness score label
+    expect(screen.getByText('Readiness score: 72.3')).toBeInTheDocument()
+
+    // Monitor coaching badge rendered by CoachingFlagsPanel
+    expect(screen.getByText('Monitor')).toBeInTheDocument()
   })
 })

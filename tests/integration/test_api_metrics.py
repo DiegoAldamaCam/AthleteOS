@@ -63,6 +63,9 @@ CREATE TABLE IF NOT EXISTS athlete_metrics (
     chronic_load_42d NUMERIC,
     acute_chronic_ratio NUMERIC,
     deload_flag      SMALLINT,
+    fatigue_score    FLOAT,
+    readiness_score  FLOAT,
+    coaching_flags   TEXT,
     PRIMARY KEY (athlete_id, metric_date)
 );
 """
@@ -111,12 +114,14 @@ def _insert_row(conn, athlete_id: str, metric_date: date, acute_load: float = 10
             """
             INSERT INTO athlete_metrics
                 (athlete_id, metric_date, acute_load, chronic_load_28d, chronic_load_42d,
-                 acute_chronic_ratio, deload_flag)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                 acute_chronic_ratio, deload_flag,
+                 fatigue_score, readiness_score, coaching_flags)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (athlete_id, metric_date) DO NOTHING
             """,
             (athlete_id, metric_date, acute_load, acute_load * 0.9, acute_load * 0.85,
-             round(acute_load / (acute_load * 0.9), 4) if acute_load * 0.9 else None, 0),
+             round(acute_load / (acute_load * 0.9), 4) if acute_load * 0.9 else None, 0,
+             20.0, 65.0, "[]"),
         )
 
 
@@ -131,11 +136,33 @@ def _insert_row_with_nulls(conn, athlete_id: str, metric_date: date) -> None:
             """
             INSERT INTO athlete_metrics
                 (athlete_id, metric_date, acute_load, chronic_load_28d, chronic_load_42d,
-                 acute_chronic_ratio, deload_flag)
-            VALUES (%s, %s, %s, %s, %s, NULL, NULL)
+                 acute_chronic_ratio, deload_flag,
+                 fatigue_score, readiness_score, coaching_flags)
+            VALUES (%s, %s, %s, %s, %s, NULL, NULL, NULL, NULL, NULL)
             ON CONFLICT (athlete_id, metric_date) DO NOTHING
             """,
             (athlete_id, metric_date, 80.0, 72.0, 68.0),
+        )
+
+
+def _insert_row_with_coaching_flags(
+    conn, athlete_id: str, metric_date: date, coaching_flags: str
+) -> None:
+    """Insert a row with explicit coaching_flags TEXT (JSON-encoded).
+
+    Used by Scenario 17 / 20: verify the API deserializes TEXT -> list[str].
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO athlete_metrics
+                (athlete_id, metric_date, acute_load, chronic_load_28d, chronic_load_42d,
+                 acute_chronic_ratio, deload_flag,
+                 fatigue_score, readiness_score, coaching_flags)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (athlete_id, metric_date) DO NOTHING
+            """,
+            (athlete_id, metric_date, 200.0, 100.0, 100.0, 2.0, 1, 85.0, 30.0, coaching_flags),
         )
 
 
@@ -163,6 +190,15 @@ def seeded_db(pg_conn) -> dict:
     boundary_date = datetime.now(timezone.utc).date() - timedelta(days=90)
     _insert_row(pg_conn, "A5", boundary_date)
 
+    # Scenario 17 / 20 (metrics-v2): A6 — coaching_flags TEXT '[\"deload\",\"high_fatigue\"]'
+    flags_date = date(2025, 3, 1)
+    _insert_row_with_coaching_flags(
+        pg_conn, "A6", flags_date, '["deload","high_fatigue"]'
+    )
+    # A7 — coaching_flags NULL (test null -> null passthrough)
+    null_flags_date = date(2025, 3, 2)
+    _insert_row_with_nulls(pg_conn, "A7", null_flags_date)
+
     return {
         "happy_athlete": "A1",
         "sparse_athlete": "A2",
@@ -171,6 +207,10 @@ def seeded_db(pg_conn) -> dict:
         "null_date": null_date,
         "boundary_athlete": "A5",
         "boundary_date": boundary_date,
+        "flags_athlete": "A6",
+        "flags_date": flags_date,
+        "null_flags_athlete": "A7",
+        "null_flags_date": null_flags_date,
     }
 
 
@@ -391,4 +431,87 @@ def test_exact_90_day_boundary_row_is_included(api_client, seeded_db):
     assert boundary_date in returned_dates, (
         f"Boundary date {boundary_date} not found in returned dates {returned_dates}. "
         "The endpoint must include rows where metric_date == today_utc - 90 days (inclusive)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scenario 17 / 20 (metrics-v2) — coaching_flags TEXT -> list[str] deserialization
+# ---------------------------------------------------------------------------
+
+
+def test_coaching_flags_text_deserialized_as_list(api_client, seeded_db):
+    """Scenario 17: TEXT '[\"deload\",\"high_fatigue\"]' in PG must return list[str] in API.
+
+    Proves the API router applies json.loads before returning, not raw string.
+    """
+    flags_date = seeded_db["flags_date"]
+    date_str = flags_date.isoformat()
+    resp = api_client.get(f"/athletes/A6/metrics?from={date_str}&to={date_str}")
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    data = resp.json()
+    assert len(data) == 1, f"Expected 1 row for A6 on {date_str}, got {len(data)}"
+    row = data[0]
+    assert "coaching_flags" in row, "coaching_flags field must be present in response"
+    flags = row["coaching_flags"]
+    assert isinstance(flags, list), (
+        f"coaching_flags must be a list (deserialized from TEXT), got {type(flags)!r}: {flags!r}"
+    )
+    assert flags == ["deload", "high_fatigue"], (
+        f"Expected ['deload','high_fatigue'], got {flags!r}"
+    )
+
+
+def test_coaching_flags_null_db_returns_null_in_response(api_client, seeded_db):
+    """Scenario 20: coaching_flags NULL in PG must serialize as JSON null in API response."""
+    null_flags_date = seeded_db["null_flags_date"]
+    date_str = null_flags_date.isoformat()
+    resp = api_client.get(f"/athletes/A7/metrics?from={date_str}&to={date_str}")
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    data = resp.json()
+    assert len(data) == 1, f"Expected 1 row for A7 on {date_str}, got {len(data)}"
+    row = data[0]
+    assert "coaching_flags" in row, "coaching_flags field must be present"
+    assert row["coaching_flags"] is None, (
+        f"coaching_flags=NULL in DB must be null in JSON response, got {row['coaching_flags']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# FIX 1: Malformed coaching_flags TEXT must yield coaching_flags=None (no 500)
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_coaching_flags_text_does_not_500(api_client, pg_conn, seeded_db):
+    """FIX 1: A corrupt/non-JSON coaching_flags TEXT value must return coaching_flags=None.
+
+    A single bad value must NOT crash the entire endpoint with HTTP 500.
+    Graceful degradation: coaching_flags=None in the response row.
+    """
+    # Seed a row with a deliberately malformed coaching_flags TEXT value.
+    corrupt_date = date(2025, 3, 15)
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO athlete_metrics
+                (athlete_id, metric_date, acute_load, chronic_load_28d, chronic_load_42d,
+                 acute_chronic_ratio, deload_flag,
+                 fatigue_score, readiness_score, coaching_flags)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (athlete_id, metric_date) DO NOTHING
+            """,
+            ("A8", corrupt_date, 100.0, 90.0, 85.0, 1.1, 0, 20.0, 65.0, "NOT_VALID_JSON{{{"),
+        )
+
+    date_str = corrupt_date.isoformat()
+    resp = api_client.get(f"/athletes/A8/metrics?from={date_str}&to={date_str}")
+    # Must NOT be 500
+    assert resp.status_code == 200, (
+        f"Malformed coaching_flags must not crash the endpoint (500); got {resp.status_code}: {resp.text}"
+    )
+    data = resp.json()
+    assert len(data) == 1, f"Expected 1 row, got {len(data)}: {data}"
+    row = data[0]
+    assert "coaching_flags" in row, "coaching_flags field must be present in response"
+    assert row["coaching_flags"] is None, (
+        f"Corrupt coaching_flags TEXT must degrade gracefully to null, got {row['coaching_flags']!r}"
     )

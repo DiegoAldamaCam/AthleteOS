@@ -66,6 +66,113 @@ LATE_DATA: str = "LATE_DATA"
 # canonical.training_event; late/invalid records route back to its DLQ topic).
 METRICS_SOURCE_TOPIC: str = "canonical.training_event"
 
+# --- metrics-v2 score constants (spec-locked) -------------------------------
+# Fatigue score thresholds (Gabbett 2016 ACR framework).
+FATIGUE_HIGH: float = 80.0       # >= this -> "high_fatigue" flag
+FATIGUE_MONITOR: float = 70.0    # >= this and < FATIGUE_HIGH -> "monitor" flag
+READINESS_CAP: float = 80.0      # Honesty cap: readiness_score MUST NOT exceed 80 (Scenario 9)
+FATIGUE_CLAMP_CEILING: float = 5.0   # ACR ratio clamped to [0, 5] before scaling
+FATIGUE_SCALE: float = 20.0          # Scale factor: clamped_ratio * 20 -> 0..100
+
+
+# --- metrics-v2 pure functions (load-based scores + coaching flags) ---------
+
+
+def compute_fatigue_score(acute_load: float, chronic_load_42d: float) -> "float | None":
+    """Compute fatigue_score from acute load and 42-day chronic baseline.
+
+    Formula (Banister 1980 / Gabbett 2016):
+        clamp(acute_load / max(chronic_load_42d, 1.0), 0.0, FATIGUE_CLAMP_CEILING)
+        * FATIGUE_SCALE
+
+    Returns:
+        float in [0, 100], or None when chronic_load_42d == 0 (no baseline yet),
+        or None when either input is NaN (FIX 2 — NaN must not propagate as nan).
+
+    Spec: Scenarios 1-4.
+    """
+    # FIX 2: Guard NaN inputs — NaN propagates silently through arithmetic.
+    if isinstance(chronic_load_42d, float) and math.isnan(chronic_load_42d):
+        return None
+    if isinstance(acute_load, float) and math.isnan(acute_load):
+        return None
+    if chronic_load_42d == 0:
+        return None
+    ratio = acute_load / max(chronic_load_42d, 1.0)
+    clamped = min(max(ratio, 0.0), FATIGUE_CLAMP_CEILING)
+    return clamped * FATIGUE_SCALE
+
+
+def compute_readiness_score(acr: "float | None", chronic_load_28d: float) -> "float | None":
+    """Compute readiness_score via ACR-zone piecewise interpolation.
+
+    Zone boundaries (spec):
+        ACR <= 0.8: undertrained zone, score 40-60
+        ACR <= 1.0: optimal zone,      score 60-80
+        ACR <= 1.3: moderate zone,     score 60-80 (descending)
+        ACR >  1.3: high-load zone,    score 0-60  (descending)
+
+    The result is capped at READINESS_CAP (80.0) — the honesty cap ensures the
+    API never claims an athlete is fully "ready" (Scenario 9 invariant).
+
+    Returns:
+        float in [0, 80], or None when acr is None or chronic_load_28d == 0,
+        or None when either input is NaN (FIX 2 — NaN must not propagate as nan).
+
+    Spec: Scenarios 5-11.
+    """
+    # FIX 2: Guard NaN inputs before the None/zero checks.
+    if isinstance(acr, float) and math.isnan(acr):
+        return None
+    if isinstance(chronic_load_28d, float) and math.isnan(chronic_load_28d):
+        return None
+    if chronic_load_28d == 0 or acr is None:
+        return None
+    if acr <= 0.8:
+        score = 40.0 + (acr / 0.8) * 20.0
+    elif acr <= 1.0:
+        score = 60.0 + ((acr - 0.8) / 0.2) * 20.0
+    elif acr <= 1.3:
+        score = 80.0 - ((acr - 1.0) / 0.3) * 20.0
+    else:
+        score = max(0.0, 60.0 - ((acr - 1.3) / 0.7) * 60.0)
+    return min(score, READINESS_CAP)
+
+
+def compute_coaching_flags(
+    deload_flag: int,
+    fatigue_score: "float | None",
+    readiness_score: "float | None",
+) -> "list[str]":
+    """Derive the list of active coaching flag strings from the computed scores.
+
+    Active flags (multiple may be active simultaneously):
+        "deload"       -- deload_flag == 1
+        "undertrained" -- deload_flag == -1
+        "high_fatigue" -- fatigue_score >= FATIGUE_HIGH (80.0)
+        "monitor"      -- FATIGUE_MONITOR (70.0) <= fatigue_score < FATIGUE_HIGH
+
+    "high_fatigue" and "monitor" are mutually exclusive (elif guard — Scenario 16).
+    readiness_score is accepted as a parameter for forward-compat (future recovery
+    flags); it is not consumed in this slice.
+
+    Returns:
+        list[str] — empty list when no flags are active (Scenario 14).
+
+    Spec: Scenarios 12-16.
+    """
+    flags: list[str] = []
+    if deload_flag == 1:
+        flags.append("deload")
+    if deload_flag == -1:
+        flags.append("undertrained")
+    if fatigue_score is not None:
+        if fatigue_score >= FATIGUE_HIGH:
+            flags.append("high_fatigue")
+        elif FATIGUE_MONITOR <= fatigue_score < FATIGUE_HIGH:
+            flags.append("monitor")
+    return flags
+
 
 # --- NaN / Inf guard (task 5.4) --------------------------------------------
 
@@ -296,6 +403,9 @@ def metrics_row_to_json(
     chronic_load_42d_val: float,
     acr_val: "float | None",
     deload_flag: int,
+    fatigue_score_val: "float | None" = None,
+    readiness_score_val: "float | None" = None,
+    coaching_flags_val: "list[str] | None" = None,
 ) -> str:
     """Serialize one metrics row to a RFC 8259-compliant JSON string.
 
@@ -305,12 +415,25 @@ def metrics_row_to_json(
 
     ACR is allowed to be None (chronic==0) or float('nan') (IEEE-754 sentinel
     from the upstream guard); both are serialized as JSON null.
+
+    FIX 3: fatigue_score_val, readiness_score_val, coaching_flags_val are now
+    included in the JSON payload so the Kafka staging topic matches the PG schema.
+    NaN scores are serialized as null (not raised) — they are derived values,
+    not raw load fields, so graceful degradation applies.
     """
     # Guard ACR: None and NaN both become null in JSON.
     if acr_val is None or (isinstance(acr_val, float) and math.isnan(acr_val)):
         acr_json: "float | None" = None
     else:
         acr_json = float(acr_val)
+
+    # Guard score fields: None and NaN both become null in JSON (graceful degradation).
+    def _score_to_json(val: "float | None") -> "float | None":
+        if val is None:
+            return None
+        if isinstance(val, float) and math.isnan(val):
+            return None
+        return float(val)
 
     payload = {
         "athlete_id": athlete_id,
@@ -320,6 +443,10 @@ def metrics_row_to_json(
         "chronic_load_42d": chronic_load_42d_val,
         "acute_chronic_ratio": acr_json,
         "deload_flag": deload_flag,
+        # FIX 3: v2 fields included in Kafka staging JSON.
+        "fatigue_score": _score_to_json(fatigue_score_val),
+        "readiness_score": _score_to_json(readiness_score_val),
+        "coaching_flags": coaching_flags_val if coaching_flags_val is not None else [],
     }
     # allow_nan=False enforces RFC 8259: any non-finite float raises ValueError
     # so the Flink operator can route the record to the DLQ (fail-fast).

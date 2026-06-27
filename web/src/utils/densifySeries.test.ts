@@ -11,6 +11,9 @@ function row(date: string, acute: number | null = 100): MetricRow {
     chronic_load_42d: 85,
     acute_chronic_ratio: 1.1,
     deload_flag: 0,
+    fatigue_score: null,
+    readiness_score: null,
+    coaching_flags: null,
   }
 }
 

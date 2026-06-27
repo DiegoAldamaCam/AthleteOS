@@ -1,4 +1,4 @@
-"""Unit tests for storage.postgres.sink (task 6.1, PR5 Phase 6).
+"""Unit tests for storage.postgres.sink (task 6.1, PR5 Phase 6 + metrics-v2).
 
 Pure, pyflink-free tests. No Docker, no real PostgreSQL connection.
 All DB interaction is tested via a fake cursor that records execute() calls.
@@ -7,10 +7,13 @@ Scenarios covered (strict TDD):
   - epoch_ms_to_date: epoch-ms day-start -> correct UTC date
   - epoch_ms_to_date: boundary at exactly midnight UTC
   - build_upsert: SQL contains ON CONFLICT (athlete_id, metric_date) DO UPDATE
-  - build_upsert: SQL updates all metric columns
+  - build_upsert: SQL updates all metric columns (including 3 new v2 cols)
   - build_upsert: acute_chronic_ratio None -> bound param is None
   - build_upsert: acute_chronic_ratio float('nan') -> bound param is None
-  - build_upsert: normal record binds all 7 fields correctly
+  - build_upsert: normal record binds all 10 fields correctly (metrics-v2)
+  - build_upsert: fatigue_score nan -> bound param is None (metrics-v2)
+  - build_upsert: readiness_score nan -> bound param is None (metrics-v2)
+  - build_upsert: coaching_flags JSON string passthrough (metrics-v2)
   - execute_upsert: batch of N records executes N upserts (or executemany)
   - upsert_with_retry: succeeds on first attempt (no retry needed)
   - upsert_with_retry: conn_factory called on OperationalError (reconnect path)
@@ -46,6 +49,9 @@ def _make_record(
     chronic_load_42d: float = 75.0,
     acute_chronic_ratio: "float | None" = 1.25,
     deload_flag: int = 0,
+    fatigue_score: "float | None" = 20.0,
+    readiness_score: "float | None" = 65.0,
+    coaching_flags: str = "[]",
 ) -> dict:
     return {
         "athlete_id": athlete_id,
@@ -55,6 +61,9 @@ def _make_record(
         "chronic_load_42d": chronic_load_42d,
         "acute_chronic_ratio": acute_chronic_ratio,
         "deload_flag": deload_flag,
+        "fatigue_score": fatigue_score,
+        "readiness_score": readiness_score,
+        "coaching_flags": coaching_flags,
     }
 
 
@@ -114,7 +123,8 @@ class TestBuildUpsert:
         sql, _ = build_upsert(record)
         sql_upper = sql.upper()
         for col in ("ACUTE_LOAD", "CHRONIC_LOAD_28D", "CHRONIC_LOAD_42D",
-                    "ACUTE_CHRONIC_RATIO", "DELOAD_FLAG"):
+                    "ACUTE_CHRONIC_RATIO", "DELOAD_FLAG",
+                    "FATIGUE_SCORE", "READINESS_SCORE", "COACHING_FLAGS"):
             assert col in sql_upper, f"Column {col!r} missing from UPDATE clause"
 
     def test_acute_chronic_ratio_none_becomes_sql_null(self):
@@ -122,9 +132,9 @@ class TestBuildUpsert:
         _, params = build_upsert(record)
         # acute_chronic_ratio is at index 5 in the params tuple
         # (order: athlete_id[0], metric_date[1], acute_load[2],
-        #  chronic_load_28d[3], chronic_load_42d[4], acr[5], deload_flag[6]).
-        # This is a position-pinned assertion; if _record_to_params ever
-        # reorders columns, this test will catch the regression.
+        #  chronic_load_28d[3], chronic_load_42d[4], acr[5], deload_flag[6],
+        #  fatigue_score[7], readiness_score[8], coaching_flags[9]).
+        # Position-pinned assertion: column-order regressions break this test.
         assert params[5] is None, (
             f"acute_chronic_ratio=None must be at params[5] as None (SQL NULL), "
             f"got {params[5]!r}"
@@ -139,7 +149,8 @@ class TestBuildUpsert:
             f"got {params[5]!r}"
         )
 
-    def test_normal_record_binds_all_7_fields(self):
+    def test_normal_record_binds_all_10_fields(self):
+        """metrics-v2: build_upsert produces 10 params (7 existing + 3 new)."""
         record = _make_record(
             athlete_id="ath_42",
             metric_date=1_704_067_200_000,   # 2024-01-01
@@ -148,31 +159,77 @@ class TestBuildUpsert:
             chronic_load_42d=79.1,
             acute_chronic_ratio=1.34,
             deload_flag=1,
+            fatigue_score=28.0,
+            readiness_score=72.5,
+            coaching_flags='["monitor"]',
         )
         sql, params = build_upsert(record)
-        # All 7 fields must appear in params (as a tuple or list)
         params_list = list(params)
+        # Positions 0-6 unchanged (regression guard)
         assert "ath_42" in params_list, "athlete_id missing from params"
         assert datetime.date(2024, 1, 1) in params_list, "metric_date (as DATE) missing from params"
         assert 110.5 in params_list, "acute_load missing from params"
         assert 82.3 in params_list, "chronic_load_28d missing from params"
         assert 79.1 in params_list, "chronic_load_42d missing from params"
-        # 1.34 is a real float — must be present (not None)
         assert any(
             isinstance(p, float) and math.isclose(p, 1.34)
             for p in params_list
         ), "acute_chronic_ratio missing from params"
         assert 1 in params_list, "deload_flag missing from params"
+        # FIX 6c: position-pinned assertions for v2 fields (match nan-test style).
+        # params[7] = fatigue_score, params[8] = readiness_score, params[9] = coaching_flags
+        assert isinstance(params[7], float) and math.isclose(params[7], 28.0), (
+            f"fatigue_score must be at params[7]=28.0, got {params[7]!r}"
+        )
+        assert isinstance(params[8], float) and math.isclose(params[8], 72.5), (
+            f"readiness_score must be at params[8]=72.5, got {params[8]!r}"
+        )
+        assert params[9] == '["monitor"]', (
+            f"coaching_flags must be at params[9]='[\"monitor\"]', got {params[9]!r}"
+        )
+        # Total must be exactly 10
+        assert len(params_list) == 10, f"Expected 10 params, got {len(params_list)}"
+
+    def test_fatigue_score_nan_becomes_sql_null(self):
+        """metrics-v2: fatigue_score=nan (IEEE-754 None sentinel) -> params[7]=None."""
+        record = _make_record(fatigue_score=float("nan"))
+        _, params = build_upsert(record)
+        assert params[7] is None, (
+            f"fatigue_score=nan must be params[7]=None (SQL NULL), got {params[7]!r}"
+        )
+
+    def test_readiness_score_nan_becomes_sql_null(self):
+        """metrics-v2: readiness_score=nan -> params[8]=None."""
+        record = _make_record(readiness_score=float("nan"))
+        _, params = build_upsert(record)
+        assert params[8] is None, (
+            f"readiness_score=nan must be params[8]=None (SQL NULL), got {params[8]!r}"
+        )
+
+    def test_coaching_flags_json_string_passthrough(self):
+        """metrics-v2: coaching_flags JSON string bound at params[9] unchanged."""
+        record = _make_record(coaching_flags='["deload","high_fatigue"]')
+        _, params = build_upsert(record)
+        assert params[9] == '["deload","high_fatigue"]', (
+            f"coaching_flags must be bound verbatim as JSON string at params[9], got {params[9]!r}"
+        )
+
+    def test_coaching_flags_empty_list_is_json_array(self):
+        """metrics-v2: empty coaching_flags -> '[]' (never None) at params[9]."""
+        record = _make_record(coaching_flags="[]")
+        _, params = build_upsert(record)
+        assert params[9] == "[]", (
+            f"empty coaching_flags must be '[]' at params[9], got {params[9]!r}"
+        )
 
     def test_normal_record_acr_is_not_none_when_finite(self):
         record = _make_record(acute_chronic_ratio=0.95)
         _, params = build_upsert(record)
-        params_list = list(params)
-        assert None not in params_list, "acr=0.95 must NOT bind as None"
-        assert any(
-            isinstance(p, float) and math.isclose(p, 0.95)
-            for p in params_list
-        ), "acr value 0.95 missing from params"
+        # acr=0.95 is finite — it must appear at params[5], not as None
+        assert params[5] is not None, "acr=0.95 must NOT bind as None"
+        assert isinstance(params[5], float) and math.isclose(params[5], 0.95), (
+            f"acr value 0.95 missing from params[5], got {params[5]!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -22,3 +22,7 @@ class MetricRow(BaseModel):
     chronic_load_42d: Optional[float]
     acute_chronic_ratio: Optional[float]
     deload_flag: Optional[int]
+    # metrics-v2: load-based scores + coaching flags (additive, nullable)
+    fatigue_score: Optional[float] = None
+    readiness_score: Optional[float] = None
+    coaching_flags: Optional[list[str]] = None
