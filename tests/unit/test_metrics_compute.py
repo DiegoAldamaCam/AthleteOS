@@ -39,7 +39,10 @@ from jobs.metrics.compute import (
     acute_load,
     build_metrics_dlq_envelope,
     chronic_load,
+    compute_coaching_flags,
     compute_deload_flags,
+    compute_fatigue_score,
+    compute_readiness_score,
     compute_rolling_metrics,
     is_finite_load,
     metrics_row_to_json,
@@ -603,3 +606,143 @@ class TestMetricsRowToJson:
         parsed = json.loads(result)  # raises json.JSONDecodeError if invalid
         assert parsed["deload_flag"] == 1
         assert parsed["metric_date"] == 1_000_000_000_000
+
+
+# ---------------------------------------------------------------------------
+# compute_fatigue_score (metrics-v2, Scenarios 1-4)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeFatigueScore:
+    """Scenario 1-4: fatigue_score = clamp(acute / max(chronic42,1), 0, 5) * 20."""
+
+    def test_scenario_1_standard_computation(self):
+        # Sc 1: acute=100, chronic_42d=50 -> ratio=2.0, clamped=2.0, *20=40.0
+        assert compute_fatigue_score(100.0, 50.0) == pytest.approx(40.0)
+
+    def test_scenario_2_chronic_zero_returns_none(self):
+        # Sc 2: chronic_load_42d==0 -> NULL guard -> None
+        assert compute_fatigue_score(100.0, 0.0) is None
+
+    def test_scenario_3_saturation_ceiling(self):
+        # Sc 3: acute=600, chronic_42d=100 -> ratio=6 > clamp ceiling of 5 -> 5*20=100.0
+        assert compute_fatigue_score(600.0, 100.0) == pytest.approx(100.0)
+
+    def test_scenario_4_zero_acute_load(self):
+        # Sc 4: acute=0, chronic_42d=80 -> ratio=0 -> 0*20=0.0
+        assert compute_fatigue_score(0.0, 80.0) == pytest.approx(0.0)
+
+    def test_triangulation_moderate_ratio(self):
+        # Triangulation: ratio=1.0 (100/100) -> 1.0*20=20.0
+        assert compute_fatigue_score(100.0, 100.0) == pytest.approx(20.0)
+
+    def test_triangulation_max_clamp_boundary(self):
+        # ratio exactly 5 (at ceiling): 250/50 -> 5*20=100.0 (boundary, not exceeded)
+        assert compute_fatigue_score(250.0, 50.0) == pytest.approx(100.0)
+
+
+# ---------------------------------------------------------------------------
+# compute_readiness_score (metrics-v2, Scenarios 5-11)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeReadinessScore:
+    """Scenario 5-11: readiness_score piecewise ACR zones, capped at 80.0."""
+
+    def test_scenario_5_optimal_acr_1_0(self):
+        # Sc 5: acr=1.0, chronic_28d=50 -> zone <=1.0: 60+(0.2/0.2)*20=80.0
+        assert compute_readiness_score(1.0, 50.0) == pytest.approx(80.0)
+
+    def test_scenario_6_acr_boundary_0_8(self):
+        # Sc 6: acr=0.8, chronic_28d=50 -> zone <=0.8: 40+(0.8/0.8)*20=60.0
+        assert compute_readiness_score(0.8, 50.0) == pytest.approx(60.0)
+
+    def test_scenario_7_acr_boundary_1_3(self):
+        # Sc 7: acr=1.3, chronic_28d=50 -> zone <=1.3: 80-(0.3/0.3)*20=60.0
+        assert compute_readiness_score(1.3, 50.0) == pytest.approx(60.0)
+
+    def test_scenario_8_chronic_zero_returns_none(self):
+        # Sc 8: chronic_load_28d==0 -> NULL guard -> None
+        assert compute_readiness_score(1.0, 0.0) is None
+
+    def test_scenario_8_acr_none_returns_none(self):
+        # Sc 8 variant: acr=None -> None
+        assert compute_readiness_score(None, 50.0) is None
+
+    def test_scenario_9_readiness_never_exceeds_80(self):
+        # Sc 9 invariant: ACR sweep 0..3 step 0.01 — no value > 80.0
+        import math
+        for acr_i in range(0, 301):
+            acr = acr_i / 100.0
+            result = compute_readiness_score(acr, 100.0)
+            assert result is not None
+            assert result <= 80.0, f"readiness_score exceeded 80.0 at acr={acr}: {result}"
+
+    def test_scenario_10_high_load_zone_descent(self):
+        # Sc 10: acr=2.0, chronic_28d=50
+        # zone >1.3: max(0, 60-((2.0-1.3)/0.7)*60)=max(0,60-60)=0.0
+        assert compute_readiness_score(2.0, 50.0) == pytest.approx(0.0)
+
+    def test_scenario_11_undertrained_minimum(self):
+        # Sc 11: acr=0.0, chronic_28d=50 -> zone <=0.8: 40+(0.0/0.8)*20=40.0
+        assert compute_readiness_score(0.0, 50.0) == pytest.approx(40.0)
+
+    def test_triangulation_undertrained_midpoint(self):
+        # acr=0.4 -> zone <=0.8: 40+(0.4/0.8)*20=40+10=50.0
+        assert compute_readiness_score(0.4, 50.0) == pytest.approx(50.0)
+
+    def test_triangulation_high_load_clamp_to_zero(self):
+        # acr=3.0 (way into danger zone): max(0, 60-((3.0-1.3)/0.7)*60)=max(0,60-145.7)<0 -> 0.0
+        result = compute_readiness_score(3.0, 50.0)
+        assert result == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# compute_coaching_flags (metrics-v2, Scenarios 12-16)
+# ---------------------------------------------------------------------------
+
+
+class TestComputeCoachingFlags:
+    """Scenarios 12-16: coaching_flags derivation from deload_flag and fatigue_score."""
+
+    def test_scenario_12_single_deload_flag(self):
+        # Sc 12: deload=1, fatigue=50 -> ["deload"]
+        assert compute_coaching_flags(1, 50.0, None) == ["deload"]
+
+    def test_scenario_13_multiple_flags_simultaneously(self):
+        # Sc 13: deload=1, fatigue=85 -> ["deload","high_fatigue"]
+        assert compute_coaching_flags(1, 85.0, None) == ["deload", "high_fatigue"]
+
+    def test_scenario_14_empty_array_when_no_flags(self):
+        # Sc 14: deload=0, fatigue=55 -> []
+        assert compute_coaching_flags(0, 55.0, None) == []
+
+    def test_scenario_15_monitor_flag_at_lower_boundary(self):
+        # Sc 15: deload=0, fatigue=70.0 -> ["monitor"] (70 <= f < 80)
+        assert compute_coaching_flags(0, 70.0, None) == ["monitor"]
+
+    def test_scenario_16_high_fatigue_at_exact_boundary(self):
+        # Sc 16: deload=0, fatigue=80.0 -> ["high_fatigue"] NOT ["monitor"]
+        result = compute_coaching_flags(0, 80.0, None)
+        assert result == ["high_fatigue"], (
+            f"fatigue=80.0 must produce ['high_fatigue'] (>= FATIGUE_HIGH=80), "
+            f"not ['monitor'] (70<=f<80). Got: {result}"
+        )
+
+    def test_undertrained_flag(self):
+        # deload=-1 -> "undertrained"
+        assert compute_coaching_flags(-1, 55.0, None) == ["undertrained"]
+
+    def test_none_fatigue_no_fatigue_flags(self):
+        # fatigue_score=None -> no high_fatigue, no monitor
+        assert compute_coaching_flags(0, None, None) == []
+
+    def test_triangulation_deload_and_monitor(self):
+        # deload=1, fatigue=75 -> ["deload","monitor"]
+        assert compute_coaching_flags(1, 75.0, None) == ["deload", "monitor"]
+
+    def test_triangulation_high_fatigue_above_boundary(self):
+        # fatigue=95 -> high_fatigue
+        result = compute_coaching_flags(0, 95.0, None)
+        assert result == ["high_fatigue"]
+        assert "monitor" not in result, "high_fatigue and monitor must be mutually exclusive"

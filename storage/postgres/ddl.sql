@@ -22,3 +22,11 @@ CREATE TABLE IF NOT EXISTS athlete_metrics (
 
 CREATE INDEX IF NOT EXISTS idx_athlete_metrics_athlete
     ON athlete_metrics (athlete_id);
+
+-- metrics-v2: load-based scores and coaching flags (additive columns, idempotent).
+-- DDL MUST run before deploying the new job binary (ADR-D1, WARNING-3).
+-- IF NOT EXISTS guarantees idempotency (Scenario 18).
+ALTER TABLE athlete_metrics
+    ADD COLUMN IF NOT EXISTS fatigue_score   FLOAT NULL,
+    ADD COLUMN IF NOT EXISTS readiness_score FLOAT NULL,
+    ADD COLUMN IF NOT EXISTS coaching_flags  TEXT  NULL;
