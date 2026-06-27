@@ -122,3 +122,78 @@ class TestBuildDegradedResponse:
         ]
         result = build_degraded_response(topics)
         assert len(result["topics"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# OFFSET_INVALID sentinel handling (B9, B10 — Slice B hardening)
+# ---------------------------------------------------------------------------
+
+
+class TestOffsetInvalidGuard:
+    """OFFSET_INVALID (-1001) must contribute 0 to depth; broker_reachable stays True.
+
+    Spec: obs #98 Slice B — OFFSET_INVALID Sentinel Handling.
+    Design: obs #99 ADR H7 — explicit named guard in _depth_for_topic.
+    """
+
+    def _make_mock_admin(self, partitions_with_offsets: dict):
+        """Build a minimal mock AdminClient that returns specified offsets.
+
+        partitions_with_offsets: {partition_id: offset_value}
+        The topic name is hard-coded to 'dlq.canonical.training_event'.
+        """
+        from unittest.mock import MagicMock
+
+        topic_name = "dlq.canonical.training_event"
+
+        # Build fake metadata
+        metadata = MagicMock()
+
+        part_meta = MagicMock()
+        part_meta.partitions = {pid: MagicMock() for pid in partitions_with_offsets}
+        metadata.topics = {topic_name: part_meta}
+
+        # Build fake list_offsets futures
+        def _list_offsets(specs, request_timeout=5.0):
+            futures = {}
+            for tp in specs:
+                future = MagicMock()
+                result = MagicMock()
+                result.offset = partitions_with_offsets[tp.partition]
+                future.result.return_value = result
+                futures[tp] = future
+            return futures
+
+        admin = MagicMock()
+        admin.list_topics.return_value = metadata
+        admin.list_offsets.side_effect = _list_offsets
+
+        return admin, topic_name
+
+    def test_offset_invalid_contributes_zero_to_depth(self):
+        """B9: Partition returning OFFSET_INVALID (-1001) → contributes 0, not -1001."""
+        from confluent_kafka import OFFSET_INVALID
+        from api.kafka_admin import _depth_for_topic
+
+        admin, topic_name = self._make_mock_admin({0: OFFSET_INVALID})
+        metadata = admin.list_topics.return_value
+
+        depth = _depth_for_topic(admin, metadata, topic_name, request_timeout=5.0)
+
+        assert depth == 0, (
+            f"OFFSET_INVALID partition must contribute 0 to depth, got {depth}"
+        )
+
+    def test_offset_invalid_mixed_with_valid_offset(self):
+        """B10: One partition has offset 5, another OFFSET_INVALID → total depth == 5."""
+        from confluent_kafka import OFFSET_INVALID
+        from api.kafka_admin import _depth_for_topic
+
+        admin, topic_name = self._make_mock_admin({0: 5, 1: OFFSET_INVALID})
+        metadata = admin.list_topics.return_value
+
+        depth = _depth_for_topic(admin, metadata, topic_name, request_timeout=5.0)
+
+        assert depth == 5, (
+            f"Valid offset 5 + OFFSET_INVALID → depth should be 5, got {depth}"
+        )
