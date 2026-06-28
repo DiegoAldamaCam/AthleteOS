@@ -434,3 +434,50 @@ def build_planning_upsert(record: dict) -> tuple[str, tuple]:
         str(record["weekly_volume_targets"]),
     )
     return _PLANNING_UPSERT_SQL, params
+
+
+# ---------------------------------------------------------------------------
+# Adherence-score UPSERT (adherence_metrics job — ADH-D2/D3/D4)
+# ---------------------------------------------------------------------------
+#
+# CRITICAL: _ADHERENCE_UPSERT_SQL is a SEPARATE constant from _UPSERT_SQL,
+# _RECOVERY_UPSERT_SQL, and _PLANNING_UPSERT_SQL. DO NOT modify any existing
+# symbol above this section.
+#
+# This INSERT lists ONLY 3 columns: (athlete_id, metric_date, adherence_score).
+# DO UPDATE SET touches ONLY adherence_score:
+#   - On an existing row: all other columns (load, recovery, coaching) are
+#     untouched (ADH-D2, ADH-D3, ADH-D4).
+#   - metric_date is a datetime.date (block-level) — do NOT call epoch_ms_to_date
+#     here; this is NOT the epoch-ms path used by recovery.
+
+_ADHERENCE_UPSERT_SQL: str = """
+INSERT INTO athlete_metrics (athlete_id, metric_date, adherence_score)
+VALUES (%s, %s, %s)
+ON CONFLICT (athlete_id, metric_date)
+DO UPDATE SET adherence_score = EXCLUDED.adherence_score
+""".strip()
+
+
+def build_adherence_upsert(record: dict) -> "tuple[str, tuple]":
+    """Build the parameterized adherence-score UPSERT SQL and params.
+
+    Args:
+        record: A dict with keys:
+            athlete_id (str),
+            metric_date (datetime.date) — already a date, NOT epoch-ms,
+            adherence_score (float | None)
+
+    Returns:
+        (sql, params) where sql is _ADHERENCE_UPSERT_SQL and params is a
+        3-tuple: (athlete_id_str, metric_date_as_date, adherence_score_float_or_none).
+    """
+    # metric_date is a datetime.date at the block level — no epoch_ms_to_date call.
+    md: "datetime.date" = record["metric_date"]
+    score: "float | None" = _sanitize_float(record.get("adherence_score"))
+    params: tuple = (
+        str(record["athlete_id"]),
+        md,
+        score,
+    )
+    return _ADHERENCE_UPSERT_SQL, params

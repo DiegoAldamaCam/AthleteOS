@@ -39,3 +39,6 @@ ALTER TABLE athlete_metrics ALTER COLUMN acute_load DROP NOT NULL;
 ALTER TABLE athlete_metrics ALTER COLUMN chronic_load_28d DROP NOT NULL;
 ALTER TABLE athlete_metrics ALTER COLUMN chronic_load_42d DROP NOT NULL;
 ALTER TABLE athlete_metrics ALTER COLUMN deload_flag DROP NOT NULL;
+
+-- adherence-source: adherence_score column (additive, idempotent) — ADH-D1
+ALTER TABLE athlete_metrics ADD COLUMN IF NOT EXISTS adherence_score FLOAT NULL;
