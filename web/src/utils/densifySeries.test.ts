@@ -15,6 +15,7 @@ function row(date: string, acute: number | null = 100): MetricRow {
     readiness_score: null,
     coaching_flags: null,
     recovery_score: null,
+    adherence_score: null,
   }
 }
 

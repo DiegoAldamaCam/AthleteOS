@@ -54,6 +54,7 @@ function makeMetricRows(count = 5): MetricRow[] {
     readiness_score: null,
     coaching_flags: null,
     recovery_score: null,
+    adherence_score: null,
   }))
 }
 
@@ -193,6 +194,7 @@ describe('Scenario: sparse-gap — densified series preserves null gap', () => {
         readiness_score: null,
         coaching_flags: null,
         recovery_score: null,
+        adherence_score: null,
       },
       {
         athlete_id: 'A1',
@@ -206,6 +208,7 @@ describe('Scenario: sparse-gap — densified series preserves null gap', () => {
         readiness_score: null,
         coaching_flags: null,
         recovery_score: null,
+        adherence_score: null,
       },
     ]
 
@@ -310,6 +313,7 @@ describe('Scenario: metrics-v2 scores and coaching flags visible', () => {
         readiness_score: 72.3,
         coaching_flags: ['monitor'],
         recovery_score: null,
+        adherence_score: null,
       },
     ]
 
@@ -348,6 +352,7 @@ describe('Scenario: W3-12 — recovery_score null renders "--"', () => {
         readiness_score: null,
         coaching_flags: null,
         recovery_score: null,
+        adherence_score: null,
       },
     ]
 
@@ -380,6 +385,7 @@ describe('Scenario: W3-13 — recovery_score 73.3 renders "73.3"', () => {
         readiness_score: null,
         coaching_flags: null,
         recovery_score: 73.3,
+        adherence_score: null,
       },
     ]
 
@@ -390,5 +396,71 @@ describe('Scenario: W3-13 — recovery_score 73.3 renders "73.3"', () => {
 
     // Must render "73.3" — exactly 1 decimal place
     await screen.findByText('Recovery score: 73.3')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADH-U1: adherence_score null renders "–" (en-dash U+2013)
+// ---------------------------------------------------------------------------
+
+describe('Scenario: ADH-U1 — adherence_score null renders "–"', () => {
+  it('displays en-dash "–" for adherence score when adherence_score is null', async () => {
+    const rows: MetricRow[] = [
+      {
+        athlete_id: 'A1',
+        metric_date: '2025-03-01',
+        acute_load: 100,
+        chronic_load_28d: 90,
+        chronic_load_42d: 85,
+        acute_chronic_ratio: 1.1,
+        deload_flag: 0 as 0 | 1,
+        fatigue_score: null,
+        readiness_score: null,
+        coaching_flags: null,
+        recovery_score: null,
+        adherence_score: null,
+      },
+    ]
+
+    mockFetchMetrics.mockResolvedValue(rows)
+    mockFetchDlqDepth.mockResolvedValue(makeDlqOk())
+
+    renderDashboard(makeClient())
+
+    // Must render "–" (en-dash U+2013) for null adherence_score, no crash
+    await screen.findByText('Adherence score: –')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ADH-U2: adherence_score 0.7 renders "0.7" (toFixed(1))
+// ---------------------------------------------------------------------------
+
+describe('Scenario: ADH-U2 — adherence_score 0.7 renders "0.7"', () => {
+  it('displays adherence score formatted to 1 decimal place', async () => {
+    const rows: MetricRow[] = [
+      {
+        athlete_id: 'A1',
+        metric_date: '2025-03-01',
+        acute_load: 100,
+        chronic_load_28d: 90,
+        chronic_load_42d: 85,
+        acute_chronic_ratio: 1.1,
+        deload_flag: 0 as 0 | 1,
+        fatigue_score: null,
+        readiness_score: null,
+        coaching_flags: null,
+        recovery_score: null,
+        adherence_score: 0.7,
+      },
+    ]
+
+    mockFetchMetrics.mockResolvedValue(rows)
+    mockFetchDlqDepth.mockResolvedValue(makeDlqOk())
+
+    renderDashboard(makeClient())
+
+    // Must render "0.7" — exactly 1 decimal place
+    await screen.findByText('Adherence score: 0.7')
   })
 })
