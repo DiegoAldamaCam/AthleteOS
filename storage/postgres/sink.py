@@ -362,3 +362,75 @@ def build_recovery_upsert(record: dict) -> "tuple[str, tuple]":
         recovery,
     )
     return _RECOVERY_UPSERT_SQL, params
+
+
+# ---------------------------------------------------------------------------
+# Planning blocks UPSERT (planning_canonicalize job — ADR-20, ADR-21)
+# ---------------------------------------------------------------------------
+#
+# CRITICAL: _PLANNING_UPSERT_SQL is a SEPARATE constant from _UPSERT_SQL and
+# _RECOVERY_UPSERT_SQL. DO NOT modify any existing symbol above this section.
+#
+# ADR-21: INSERT ... ON CONFLICT (athlete_id, block_id, ingest_time) DO NOTHING.
+# Because the conflict target is the FULL versioning PK, a genuine new revision
+# (different ingest_time) NEVER conflicts → true INSERT. An exact replay (same
+# event reprocessed → same ingest_time) → DO NOTHING (idempotent). NO DO UPDATE
+# — that would overwrite revision history and violate ADR-20.
+#
+# ADR-20: PK = (athlete_id, block_id, ingest_time). Multiple revisions with the
+# same (athlete_id, block_id) coexist in the table. Downstream adherence queries
+# resolve "plan version in effect on date X" via ORDER BY ingest_time DESC LIMIT 1.
+#
+# Isolation: references ONLY planning_blocks, NEVER athlete_metrics.
+
+_PLANNING_UPSERT_SQL: str = """
+INSERT INTO planning_blocks
+    (athlete_id, block_id, ingest_time,
+     goal, start_date, end_date,
+     planned_sessions_per_week, weekly_volume_targets)
+VALUES
+    (%s, %s, %s, %s, %s, %s, %s, %s)
+ON CONFLICT (athlete_id, block_id, ingest_time)
+DO NOTHING
+""".strip()
+
+
+def build_planning_upsert(record: dict) -> tuple[str, tuple]:
+    """Build the parameterized planning-blocks INSERT SQL and params.
+
+    Uses INSERT ... ON CONFLICT (athlete_id, block_id, ingest_time) DO NOTHING
+    per ADR-21. The conflict target is the full versioning PK, so a genuine new
+    revision (new ingest_time) never conflicts and is inserted as a true new row.
+    An exact replay (same ingest_time) silently does nothing (idempotent).
+
+    Args:
+        record: A canonical PlanningBlock dict with keys:
+            athlete_id (str),
+            block_id (str),
+            ingest_time (int epoch-ms),
+            goal (str),
+            start_date (int epoch-ms — UTC midnight of the planning start date),
+            end_date   (int epoch-ms — UTC midnight of the planning end date),
+            planned_sessions_per_week (int),
+            weekly_volume_targets (str — JSON string)
+
+    Returns:
+        (sql, params) where sql is _PLANNING_UPSERT_SQL and params is an
+        8-tuple in the column order above.
+    """
+    # start_date / end_date: canonical record carries epoch-ms; convert to
+    # UTC calendar date for the DATE column in planning_blocks.
+    start_date_val: datetime.date = epoch_ms_to_date(int(record["start_date"]))
+    end_date_val: datetime.date = epoch_ms_to_date(int(record["end_date"]))
+
+    params: tuple = (
+        str(record["athlete_id"]),
+        str(record["block_id"]),
+        int(record["ingest_time"]),
+        str(record["goal"]),
+        start_date_val,
+        end_date_val,
+        int(record["planned_sessions_per_week"]),
+        str(record["weekly_volume_targets"]),
+    )
+    return _PLANNING_UPSERT_SQL, params
