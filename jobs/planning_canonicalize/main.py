@@ -25,9 +25,9 @@ raw.planning → canonical.planning_block (Avro) + dlq.canonical.planning_block:
         # midnight of start_date). Falls back to record_timestamp on parse error.
       -> key_by(athlete_id)         # ADR-4 co-partitioning (NOT event_id)
       -> .process(PlanningCanonicalizeProcessFunction, output_type=...)
-        # ValueState<bool> seen(event_id only), StateTtlConfig 7d (OnCreateAndWrite
-        # + NeverReturnExpired). ADR-20: NO block_id dedup state — repeat block_id
-        # is a NEW plan revision, never dropped. Emits via ``yield``:
+        # MapState<event_id, bool> seen_events (7d TTL per entry, OnCreateAndWrite
+        # + NeverReturnExpired). ADR-20: NO block_id dedup — repeat block_id is a
+        # NEW plan revision, never dropped. Emits via ``yield``:
         #   -> main:  yield Row(... canonical PlanningBlock ...)
         #   -> side:  yield dlq_tag, json.dumps(build_dlq_envelope(...))
       [main] -> StreamTableEnvironment.from_data_stream(canonical_table)
@@ -40,10 +40,20 @@ ADR-20: Block identity = VERSIONING, not dedup-by-key
 ======================================================
 Planning keys the stream by athlete_id (ADR-4) so all events for the same
 athlete co-locate in one Flink partition. The ProcessFunction deduplicates ONLY
-by event_id (ValueState<bool>) to guarantee idempotent reprocessing. It MUST NOT
-carry any ValueState keyed on block_id — dropping a repeat block_id would
-discard a plan revision (the exact anti-goal). The PG PK (athlete_id, block_id,
-ingest_time) absorbs multiple revisions without conflict (ADR-21 DO NOTHING).
+by event_id using MapState<event_id, bool> to guarantee idempotent reprocessing.
+
+CRITICAL — why MapState, not ValueState:
+  The operator key is athlete_id. A ValueState<bool> has ONE cell per operator
+  key, i.e. one boolean per athlete. After event_A is processed and
+  state.update(True) is called, the NEXT event for the same athlete (regardless
+  of its event_id) would see state.value() == True and be silently dropped.
+  MapState<event_id, bool> provides one cell PER event_id within the athlete
+  partition — exactly the per-event_id dedup semantics required.
+
+The ProcessFunction MUST NOT carry any MapState keyed on block_id — dropping a
+repeat block_id would discard a plan revision (the exact anti-goal). The PG PK
+(athlete_id, block_id, ingest_time) absorbs multiple revisions without conflict
+(ADR-21 DO NOTHING).
 """
 
 from __future__ import annotations
@@ -150,7 +160,7 @@ def run(config: PlanningCanonicalizeJobConfig) -> None:  # pragma: no cover - fl
         KafkaSource,
     )
     from pyflink.datastream.functions import KeyedProcessFunction
-    from pyflink.datastream.state import StateTtlConfig, ValueStateDescriptor
+    from pyflink.datastream.state import MapStateDescriptor, StateTtlConfig
     from pyflink.table import (
         EnvironmentSettings,
         StreamTableEnvironment,
@@ -253,14 +263,22 @@ def run(config: PlanningCanonicalizeJobConfig) -> None:  # pragma: no cover - fl
     )
 
     class PlanningCanonicalizeProcessFunction(KeyedProcessFunction):  # type: ignore[misc]
-        """Dedup (ValueState<bool> per event_id, 7d TTL) + validate + transform.
+        """Dedup (MapState<event_id, bool> per athlete, 7d TTL per entry) + validate + transform.
 
         ADR-20: Keyed by ``athlete_id`` (ADR-4 co-partitioning). Dedup is
-        event_id ONLY via ValueState<bool>. NO block_id state — repeat block_id
-        = new plan revision (kept, not dropped). First-seen event_id →
-        validate + transform + yield canonical Row; duplicate event_id →
-        silently dropped (PL2-2). ValidationError / TransformError → DLQ
-        side output (PL2-3/PL2-6/PL2-7/PL2-8).
+        event_id ONLY via MapState<str, bool> — each event_id gets its own
+        map entry within the per-athlete state partition. NO block_id state —
+        repeat block_id = new plan revision (kept, not dropped). First-seen
+        event_id → validate + transform + yield canonical Row; duplicate
+        event_id → silently dropped (PL2-2). ValidationError / TransformError
+        → DLQ side output (PL2-3/PL2-6/PL2-7/PL2-8).
+
+        WHY MapState, not ValueState:
+          The operator key is athlete_id. ValueState<bool> would provide ONE
+          cell per athlete — after the first event is processed, all subsequent
+          events for the same athlete would be silently dropped regardless of
+          their event_id. MapState<event_id, bool> gives one cell PER event_id
+          within the athlete partition, which is the correct dedup granularity.
 
         PyFlink KeyedProcessFunction emits via ``yield``; Java Collector does
         NOT exist on the Python side.
@@ -277,13 +295,19 @@ def run(config: PlanningCanonicalizeJobConfig) -> None:  # pragma: no cover - fl
                 .set_state_visibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
                 .build()
             )
-            # ADR-20: event_id dedup state ONLY — NO block_id state.
-            # The descriptor name encodes the dedup key explicitly to make
-            # ADR-20 compliance auditable via source inspection.
-            self._seen = runtime_context.get_state(
-                ValueStateDescriptor("seen-planning-event-id", Types.BOOLEAN())
+            # ADR-20: event_id dedup via MapState<event_id, bool>.
+            # Each map entry corresponds to one distinct event_id seen for the
+            # current athlete partition. The descriptor name makes ADR-20
+            # compliance auditable via source inspection.
+            # TTL applies per-entry: entries expire 7d after last write.
+            self._seen_events = runtime_context.get_map_state(
+                MapStateDescriptor(
+                    "seen-planning-event-ids",
+                    Types.STRING(),
+                    Types.BOOLEAN(),
+                )
             )
-            self._seen.enable_time_to_live(ttl)
+            self._seen_events.enable_time_to_live(ttl)
 
         def process_element(self, value: str, ctx: Any) -> None:
             # Parse the raw JSON envelope first to extract event_id for dedup.
@@ -307,19 +331,19 @@ def run(config: PlanningCanonicalizeJobConfig) -> None:  # pragma: no cover - fl
             athlete_id = raw.get("athlete_id") if isinstance(raw, dict) else None
             event_id = raw.get("event_id") if isinstance(raw, dict) else None
 
-            # Dedup: ValueState<bool> keyed by event_id (7d TTL).
-            # The operator is keyed by athlete_id (ADR-4); the state descriptor
-            # scopes to the current key (athlete_id). event_id uniqueness is
-            # therefore guaranteed per-athlete, which is sufficient because
-            # event_ids are globally unique UUIDs — no cross-athlete collision.
-            if bool(self._seen.value()):
+            # Dedup: MapState<event_id, bool> per athlete (7d TTL per entry).
+            # self._seen_events.contains(event_id) returns True only if this
+            # specific event_id has been processed before for this athlete.
+            # Different event_ids for the same athlete each get their own entry.
+            if event_id and self._seen_events.contains(event_id):
                 return  # duplicate within 7d re-delivery window → silently dropped (PL2-2)
 
             try:
                 validate_planning_block(raw)
                 canonical = transform_planning_to_canonical(raw, self._schema_version)
             except (ValidationError, TransformError) as exc:
-                self._seen.update(True)  # mark to avoid re-routing the same bad event
+                if event_id:
+                    self._seen_events.put(event_id, True)  # avoid re-routing the same bad event
                 yield dlq_tag, json.dumps(
                     build_dlq_envelope(
                         original_topic=config.raw_topic,
@@ -332,13 +356,15 @@ def run(config: PlanningCanonicalizeJobConfig) -> None:  # pragma: no cover - fl
                 )
                 return
 
-            # Mark seen and emit canonical Row.
-            self._seen.update(True)
+            # Mark event_id seen and emit canonical Row.
+            if event_id:
+                self._seen_events.put(event_id, True)
             yield Row(*[canonical[f] for f in self._field_names])
 
     # --- transform pipeline -------------------------------------------------
     # ADR-4: key_by athlete_id (co-partitioning). Dedup is event_id-based
-    # inside the ProcessFunction; the operator key is athlete_id.
+    # inside the ProcessFunction via MapState<event_id, bool>; the operator
+    # key is athlete_id so all events for one athlete land in one partition.
     transformed = (
         raw_stream
         .key_by(lambda raw_str: json.loads(raw_str).get("athlete_id") or "")

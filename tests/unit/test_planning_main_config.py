@@ -293,7 +293,7 @@ class TestProcessFunctionNoBlockIdState:
         """The run() wiring must key_by(athlete_id), NOT key_by(event_id).
 
         Planning keys by athlete_id (ADR-4 co-partitioning). Dedup is still
-        event_id-based via ValueState inside the ProcessFunction.
+        event_id-based via MapState inside the ProcessFunction.
         """
         import jobs.planning_canonicalize.main as m
         source = inspect.getsource(m)
@@ -301,4 +301,38 @@ class TestProcessFunctionNoBlockIdState:
         # Check that athlete_id appears in the key_by lambda context.
         assert "athlete_id" in source, (
             "key_by must reference athlete_id (ADR-4 co-partitioning)"
+        )
+
+    def test_dedup_uses_map_state_not_value_state(self):
+        """ADR-20 / CI-fix: dedup state must be MapState[event_id → bool], NOT ValueState<bool>.
+
+        Root cause of CI failures #1/#2/#3: the operator is keyed by athlete_id
+        (ADR-4). A ValueState<bool> has ONE cell per operator key — i.e. one boolean
+        per athlete. After the first event for athlete A1 is processed and
+        _seen.update(True) is called, EVERY subsequent event for A1 (regardless of
+        event_id) hits the 'if bool(_seen.value()): return' guard and is silently
+        dropped.
+
+        The correct dedup structure for 'key_by(athlete_id) + dedup by event_id'
+        is MapState[event_id → bool] so each distinct event_id within the same
+        athlete partition has its own seen-cell.
+        """
+        import jobs.planning_canonicalize.main as m
+        source = inspect.getsource(m)
+
+        # MapStateDescriptor must be imported and used for per-event_id dedup.
+        assert "MapStateDescriptor" in source, (
+            "ADR-20 / CI-fix: dedup must use MapStateDescriptor[event_id → bool], "
+            "not ValueStateDescriptor. With key_by(athlete_id), a ValueState<bool> "
+            "has exactly ONE cell per athlete — all events after the first are silently "
+            "dropped, causing CI failures PL2-1/PL2-2/PL2-3."
+        )
+
+        # ValueStateDescriptor for 'seen-planning-event-id' must NOT remain in the
+        # source — it is the broken pattern being replaced by MapState.
+        assert 'ValueStateDescriptor("seen-planning-event-id"' not in source and (
+            "ValueStateDescriptor('seen-planning-event-id'" not in source
+        ), (
+            "ADR-20 / CI-fix: 'seen-planning-event-id' ValueStateDescriptor must be "
+            "replaced by MapStateDescriptor. Remove the ValueState-based dedup."
         )
