@@ -21,6 +21,10 @@ export interface MetricRow {
   adherence_score: number | null
 }
 
+export interface AthletesResponse {
+  athletes: string[]
+}
+
 export type DlqStatus = 'ok' | 'warning' | 'unavailable'
 
 export interface DlqTopic {

@@ -1,4 +1,4 @@
-import type { MetricRow, DlqDepthResponse } from './types'
+import type { MetricRow, DlqDepthResponse, AthletesResponse } from './types'
 
 const _apiBaseRaw = import.meta.env.VITE_API_BASE_URL as string | undefined
 if (!_apiBaseRaw) {
@@ -31,4 +31,8 @@ export function fetchMetrics(
 
 export function fetchDlqDepth(): Promise<DlqDepthResponse> {
   return apiFetch<DlqDepthResponse>('/pipeline/dlq-depth')
+}
+
+export function fetchAthletes(): Promise<string[]> {
+  return apiFetch<AthletesResponse>('/athletes').then((r) => r.athletes)
 }
