@@ -2,6 +2,7 @@
 
 Exposes:
   GET /health                    — readiness probe (DB + Kafka)
+  GET /athletes                  — sorted distinct athlete IDs (selector feed)
   GET /athletes/{id}/metrics     — metrics date-range time-series (Domain A)
   GET /pipeline/dlq-depth        — DLQ topic depth health panel (Domain B)
 """
@@ -15,7 +16,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.config import settings
-from api.routers import metrics, pipeline
+from api.routers import athletes, metrics, pipeline
 from api.observability import REGISTRY, instrument_app
 
 logger = logging.getLogger("api")
@@ -42,6 +43,7 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 app.include_router(metrics.router)
 app.include_router(pipeline.router)
+app.include_router(athletes.router)
 
 # ---------------------------------------------------------------------------
 # Observability — mount /metrics ASGI app + wire PrometheusMiddleware
