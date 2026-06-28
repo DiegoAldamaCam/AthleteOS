@@ -1,7 +1,8 @@
 """Unit tests for storage.postgres.sink — adherence_score UPSERT (ADH-D2, ADH-D3, ADH-D4).
 
-Also verifies ddl.sql includes adherence_score (ADH-D1 smoke) and that
-existing SQL constants are byte-for-byte unchanged.
+Also verifies ddl.sql includes adherence_score (ADH-D1 smoke), that
+existing SQL constants are byte-for-byte unchanged, and that the metrics
+router SELECT query includes adherence_score (ADH-A1/A2 contract).
 
 These are pure unit tests — no Docker, no real DB required.
 """
@@ -12,6 +13,7 @@ import datetime
 
 import pytest
 
+from api.routers.metrics import _SQL_METRICS_RANGE
 from storage.postgres.sink import (
     _ADHERENCE_UPSERT_SQL,  # type: ignore[attr-defined]
     _PLANNING_UPSERT_SQL,  # type: ignore[attr-defined]
@@ -274,3 +276,27 @@ class TestExistingSymbolsNonOverlap:
             "build_planning_upsert must return _PLANNING_UPSERT_SQL (unchanged)"
         )
         assert "adherence_score" not in sql
+
+
+# ---------------------------------------------------------------------------
+# ADH-A1/A2: _SQL_METRICS_RANGE must SELECT adherence_score (API contract)
+# ---------------------------------------------------------------------------
+
+
+class TestMetricsRouterSqlIncludesAdherenceScore:
+    """The metrics router SELECT must include adherence_score (ADH-A1/A2 contract)."""
+
+    def test_adh_a1_sql_metrics_range_selects_adherence_score(self):
+        """ADH-A1: _SQL_METRICS_RANGE must SELECT adherence_score from athlete_metrics."""
+        assert "adherence_score" in _SQL_METRICS_RANGE, (
+            "ADH-A1: _SQL_METRICS_RANGE must include 'adherence_score' in the SELECT list. "
+            f"Current SQL:\n{_SQL_METRICS_RANGE}"
+        )
+
+    def test_adh_a2_sql_not_null_placeholder(self):
+        """adherence_score must be a real column reference, not NULL AS adherence_score."""
+        import re
+        null_pattern = re.search(r'NULL\s+AS\s+adherence_score', _SQL_METRICS_RANGE, re.IGNORECASE)
+        assert null_pattern is None, (
+            "adherence_score must be a real column SELECT, not NULL AS adherence_score"
+        )
