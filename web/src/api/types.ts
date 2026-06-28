@@ -17,6 +17,8 @@ export interface MetricRow {
   coaching_flags: string[] | null
   // wellness-source: recovery score (additive, nullable — W3-12/W3-13)
   recovery_score: number | null
+  // adherence-source: adherence score (additive, nullable — ADH-U1/U2)
+  adherence_score: number | null
 }
 
 export type DlqStatus = 'ok' | 'warning' | 'unavailable'

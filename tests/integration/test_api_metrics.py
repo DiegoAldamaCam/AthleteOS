@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS athlete_metrics (
     fatigue_score    FLOAT,
     readiness_score  FLOAT,
     recovery_score   FLOAT,
+    adherence_score  FLOAT,
     coaching_flags   TEXT,
     PRIMARY KEY (athlete_id, metric_date)
 );

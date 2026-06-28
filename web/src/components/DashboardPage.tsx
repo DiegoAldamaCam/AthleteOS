@@ -50,6 +50,12 @@ export default function DashboardPage() {
                 ? latestRow.recovery_score.toFixed(1)
                 : '--'}
             </p>
+            <p>
+              Adherence score:{' '}
+              {latestRow.adherence_score != null
+                ? latestRow.adherence_score.toFixed(1)
+                : '–'}
+            </p>
             <CoachingFlagsPanel coaching_flags={latestRow.coaching_flags} />
           </div>
         )}

@@ -28,3 +28,5 @@ class MetricRow(BaseModel):
     coaching_flags: Optional[list[str]] = None
     # wellness-source: recovery score (additive, nullable — W3-10/W3-11)
     recovery_score: Optional[float] = None
+    # adherence-source: adherence score (additive, nullable — ADH-A1/A2)
+    adherence_score: Optional[float] = None
