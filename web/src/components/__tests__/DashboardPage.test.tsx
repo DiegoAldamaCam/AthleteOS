@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter } from 'react-router-dom'
 import DashboardPage from '../DashboardPage'
@@ -11,13 +12,15 @@ import type { MetricRow, DlqDepthResponse } from '@/api/types'
 vi.mock('@/api/client', () => ({
   fetchMetrics: vi.fn(),
   fetchDlqDepth: vi.fn(),
+  fetchAthletes: vi.fn(),
 }))
 
 // Import AFTER vi.mock so we get the mocked versions.
-import { fetchMetrics, fetchDlqDepth } from '@/api/client'
+import { fetchMetrics, fetchDlqDepth, fetchAthletes } from '@/api/client'
 
 const mockFetchMetrics = fetchMetrics as ReturnType<typeof vi.fn>
 const mockFetchDlqDepth = fetchDlqDepth as ReturnType<typeof vi.fn>
+const mockFetchAthletes = fetchAthletes as ReturnType<typeof vi.fn>
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -87,6 +90,9 @@ function makeDlqUnreachable(): DlqDepthResponse {
 // ---------------------------------------------------------------------------
 beforeEach(() => {
   vi.clearAllMocks()
+  // Default: athletes list resolves with ['A1'] so the selector renders
+  // and DashboardPage auto-selects 'A1', matching all existing fixture data.
+  mockFetchAthletes.mockResolvedValue(['A1'])
 })
 
 // ---------------------------------------------------------------------------
@@ -462,5 +468,93 @@ describe('Scenario: ADH-U2 — adherence_score 0.7 renders "0.7"', () => {
 
     // Must render "0.7" — exactly 1 decimal place
     await screen.findByText('Adherence score: 0.7')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sc-3.1: Default selection — first alphabetical athlete selected on load
+// ---------------------------------------------------------------------------
+describe('Scenario: sc-3.1 — default selection is first alphabetical athlete', () => {
+  it('auto-selects A1 when athletes list resolves with [A1, A2] and fetches metrics for A1', async () => {
+    mockFetchAthletes.mockResolvedValue(['A1', 'A2'])
+    mockFetchMetrics.mockResolvedValue(makeMetricRows(3))
+    mockFetchDlqDepth.mockResolvedValue(makeDlqOk())
+
+    renderDashboard(makeClient())
+
+    // Wait for selector to settle on A1 after athletes list resolves and useEffect fires
+    const select = await screen.findByRole('combobox')
+    await waitFor(() => expect(select).toHaveValue('A1'))
+
+    // fetchMetrics was called with A1 (the default selection)
+    await waitFor(() => {
+      expect(mockFetchMetrics).toHaveBeenCalledWith('A1', undefined, undefined)
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sc-3.2: Athlete change triggers metrics re-fetch for new athlete
+// ---------------------------------------------------------------------------
+describe('Scenario: sc-3.2 — athlete change re-fetches metrics', () => {
+  it('calls fetchMetrics with A2 when user selects A2 from the dropdown', async () => {
+    const user = userEvent.setup()
+    mockFetchAthletes.mockResolvedValue(['A1', 'A2'])
+    mockFetchMetrics.mockResolvedValue(makeMetricRows(3))
+    mockFetchDlqDepth.mockResolvedValue(makeDlqOk())
+
+    renderDashboard(makeClient())
+
+    // Wait for selector to settle on A1 after athletes list resolves and useEffect fires
+    const select = await screen.findByRole('combobox')
+    await waitFor(() => expect(select).toHaveValue('A1'))
+
+    // User changes selection to A2
+    await user.selectOptions(select, 'A2')
+
+    // fetchMetrics must be called with A2
+    await waitFor(() => {
+      expect(mockFetchMetrics).toHaveBeenCalledWith('A2', undefined, undefined)
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sc-3.3: Empty athletes list — graceful empty-state, no metrics fetch
+// ---------------------------------------------------------------------------
+describe('Scenario: sc-3.3 — empty athletes list shows empty-state', () => {
+  it('renders "No athletes available" and does not call fetchMetrics when list is empty', async () => {
+    mockFetchAthletes.mockResolvedValue([])
+    mockFetchDlqDepth.mockResolvedValue(makeDlqOk())
+
+    renderDashboard(makeClient())
+
+    // Empty-state message must appear
+    await screen.findByText(/No athletes available/i)
+
+    // fetchMetrics must NOT have been called (no athlete to select)
+    expect(mockFetchMetrics).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sc-3.4: Selector appears before the h1 in document order
+// ---------------------------------------------------------------------------
+describe('Scenario: sc-3.4 — selector is positioned above the dashboard heading', () => {
+  it('AthleteSelector appears before the h1 in DOM order', async () => {
+    mockFetchAthletes.mockResolvedValue(['A1'])
+    mockFetchMetrics.mockResolvedValue(makeMetricRows(3))
+    mockFetchDlqDepth.mockResolvedValue(makeDlqOk())
+
+    renderDashboard(makeClient())
+
+    // Wait for selector and heading to appear
+    const select = await screen.findByRole('combobox')
+    const heading = screen.getByRole('heading', { level: 1 })
+
+    // Verify document order: selector must appear before the heading
+    const position = select.compareDocumentPosition(heading)
+    // Node.DOCUMENT_POSITION_FOLLOWING = 4 means heading comes AFTER select
+    expect(position & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })

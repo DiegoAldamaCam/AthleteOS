@@ -8,6 +8,7 @@ import App from './App'
 vi.mock('@/api/client', () => ({
   fetchMetrics: vi.fn(() => new Promise(() => {})),  // perpetual loading keeps render simple
   fetchDlqDepth: vi.fn(() => new Promise(() => {})),
+  fetchAthletes: vi.fn(() => new Promise(() => {})),
 }))
 
 function renderWithProviders(ui: React.ReactElement) {
