@@ -41,6 +41,7 @@ dependencies = [
   # UI/API deps keep a floor only; minor bumps here are low-risk for this slice.
   "fastapi>=0.110",
   "uvicorn[standard]>=0.29",
+  "prometheus_client>=0.20,<1",
   # pydantic-settings backs api/config.py Settings; required at import time at runtime.
   "pydantic-settings>=2.0,<3",
   "sentry-sdk>=2.0,<3",
