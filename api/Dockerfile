@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Install only the API runtime deps (not heavy streaming deps)
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir "fastapi>=0.110" "uvicorn[standard]>=0.29" "psycopg2-binary>=2.9,<3" "pydantic>=2.0" "pydantic-settings>=2.0"
+RUN pip install --no-cache-dir "fastapi>=0.110" "uvicorn[standard]>=0.29" "psycopg2-binary>=2.9,<3" "pydantic>=2.0" "pydantic-settings>=2.0" "prometheus_client>=0.20,<1"
 
 COPY api/ ./api/
 

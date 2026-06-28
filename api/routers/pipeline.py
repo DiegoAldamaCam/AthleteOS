@@ -19,6 +19,7 @@ from fastapi import APIRouter
 
 from api.config import settings
 from api.kafka_admin import get_dlq_depths
+from api.observability import DLQ_COLLECTOR, update_dlq_gauge
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -47,8 +48,13 @@ def get_dlq_depth() -> dict:
     On any Kafka connectivity failure, returns HTTP 200 with a degraded
     envelope (broker_reachable: false) — NEVER 5xx.
     """
-    return get_dlq_depths(
+    result = get_dlq_depths(
         bootstrap_servers=settings.kafka_bootstrap_servers,
         dlq_topics=DLQ_TOPICS,
         request_timeout=settings.kafka_admin_request_timeout,
     )
+    # Update DLQ gauge: skips degraded envelope (broker_reachable=False) to
+    # retain last-value — degrade-to-200 contract and response body unchanged.
+    if DLQ_COLLECTOR is not None:
+        update_dlq_gauge(result, DLQ_COLLECTOR)
+    return result
