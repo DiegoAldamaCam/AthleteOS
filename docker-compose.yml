@@ -1,15 +1,18 @@
-# AthleteOS local runtime (PR1 foundation scaffold).
+# AthleteOS local runtime.
 #
 # Profiles mitigate service-count friction during local dev:
-#   core      -> kafka, schema-registry, flink-jobmanager, flink-taskmanager, postgres
-#   bootstrap -> schema-bootstrap (one-shot: register schemas + create topics)
-#   ingest    -> ingestion (file watcher/producers; PR2 fills this)
-#   serve     -> fastapi (real API, WU-2) + web SPA (WU-4, not yet added)
+#   core          -> kafka, schema-registry, flink-jobmanager, flink-taskmanager, postgres
+#   bootstrap     -> schema-bootstrap (one-shot: register schemas + create topics)
+#   ingest        -> ingestion (file watcher/producers)
+#   serve         -> fastapi (real API) + web SPA
+#   observability -> prometheus (9090) + grafana (3000); scrapes fastapi + flink reporters
 #
 # Start everything needed for the MVP strength slice:
 #   docker compose --profile core --profile bootstrap up -d
 # Reset topic/schema state:
 #   docker compose --profile bootstrap run --rm schema-bootstrap
+# Start observability stack (requires core + serve running):
+#   docker compose --profile observability up -d
 
 services:
   kafka:
@@ -84,8 +87,11 @@ services:
         jobmanager.rpc.address: flink-jobmanager
         rest.address: flink-jobmanager
         rest.port: 8082
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
     ports:
       - "8082:8082"
+      - "9249:9249"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8082/config || exit 1"]
       interval: 10s
@@ -111,6 +117,10 @@ services:
         taskmanager.numberOfTaskSlots: 4
         state.backend: rocksdb
         state.checkpoints.dir: file:///flink-checkpoints
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9250
+    ports:
+      - "9250:9250"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://flink-jobmanager:8082/config || exit 1"]
       interval: 10s
@@ -207,5 +217,35 @@ services:
     ports:
       - "80:80"
 
+  # ---------------------------------------------------------------------------
+  # Observability stack (profile: observability)
+  # Start with: docker compose --profile observability up -d
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    profiles: ["observability"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    profiles: ["observability"]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "athleteos"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+
 volumes:
   postgres-data:
+  grafana-data:
