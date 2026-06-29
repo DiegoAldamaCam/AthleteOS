@@ -76,6 +76,19 @@ WATERMARK_OUT_OF_ORDER_HOURS = 24
 
 _DEFAULT_SCHEMA_VERSION_FALLBACK = 1
 
+_DDL_FORBIDDEN_CHARS: str = "'\"\n\r\x00"
+
+
+def _validate_ddl_config_field(field_name: str, value: str) -> None:
+    for ch in _DDL_FORBIDDEN_CHARS:
+        if ch in value:
+            raise ValueError(
+                f"NutritionCanonicalizeJobConfig.{field_name} contains a character that is "
+                f"forbidden in DDL interpolation (char ord={ord(ch):#04x}). "
+                f"Accepted characters: printable ASCII excluding '\"\\n\\r\\x00. "
+                f"Received value (first 80 chars): {value[:80]!r}"
+            )
+
 
 def _epoch_ms_now() -> int:
     """Wall-clock now as epoch-ms long (used for DLQ envelope timestamp)."""
@@ -104,6 +117,9 @@ class NutritionCanonicalizeJobConfig:
         parallelism: int | None = None,
         no_restart: bool = False,
     ) -> None:
+        _validate_ddl_config_field("bootstrap_servers", bootstrap_servers)
+        _validate_ddl_config_field("schema_registry_url", schema_registry_url)
+        _validate_ddl_config_field("canonical_topic", canonical_topic)
         self.bootstrap_servers = bootstrap_servers
         self.schema_registry_url = schema_registry_url
         self.group_id = group_id
