@@ -8,16 +8,46 @@ Design sources:
   obs #315 (sdd/athleteos-api-auth/design), ADR-A2: api_key fail-closed.
   obs #329 (sdd/athleteos-secrets-mgmt/design), ADR-S2+S3: database_url fail-closed.
 
-Both tests PROVE fail-closed semantics DESPITE the conftest setdefault provisioning:
-  monkeypatch.delenv removes the provisioned value inside the test's scope only;
-  monkeypatch auto-reverts after the test.
-  With the target var genuinely absent at construction time, ValidationError fires.
+Fail-closed test design (W1 hardening):
+  The module api.config has a module-level singleton `settings = Settings()` that
+  runs at IMPORT TIME. Tests that delenv a required field then import (or re-import)
+  api.config are fragile when api.config is not yet in sys.modules: the module-level
+  Settings() fires BEFORE pytest.raises is entered, and the ValidationError escapes.
+
+  Fix: use importlib.reload(api.config) INSIDE the pytest.raises block. reload()
+  unconditionally re-executes the module body regardless of cache state, so the
+  module-level Settings() runs with the field already missing — deterministically.
+
+  Teardown: reload leaves api.config in a half-broken state (settings=UNDEFINED or
+  last-reload value). The `restore_config` autouse fixture (function-scoped) reloads
+  api.config AFTER monkeypatch auto-reverts, guaranteeing subsequent tests see a
+  valid `settings` regardless of test order (pytest-randomly, pytest-xdist safe).
 """
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 from pydantic import ValidationError
+
+
+@pytest.fixture(autouse=True)
+def restore_config():
+    """Reload api.config after every test to undo any reload side-effects.
+
+    Fail-closed tests reload api.config with a required field missing, leaving
+    the module singleton in an invalid state. This fixture runs the reload AFTER
+    the test body (and after monkeypatch auto-reverts the env), so the next test
+    always starts from a clean, fully-populated settings singleton.
+
+    autouse=True: applies to every test in this file; zero boilerplate per test.
+    """
+    import api.config  # ensure module is in sys.modules before yield
+
+    yield
+    # monkeypatch has already reverted env vars by the time this runs
+    importlib.reload(api.config)
 
 
 class TestApiKeyRequiredField:
@@ -26,16 +56,16 @@ class TestApiKeyRequiredField:
     def test_missing_api_key_raises_validation_error(self, monkeypatch):
         """sc-9: Settings() with API_KEY absent → ValidationError (fail-closed).
 
-        monkeypatch.delenv removes the conftest-provisioned API_KEY for this
-        test's scope only, proving the field is genuinely required at construction
-        and that the conftest provision does NOT weaken the fail-closed guarantee.
+        Uses importlib.reload(api.config) inside pytest.raises to prove the
+        module-level Settings() raises regardless of whether api.config was
+        already cached in sys.modules. Deterministic under any test order.
         """
+        import api.config
+
         monkeypatch.delenv("API_KEY", raising=False)
 
-        from api.config import Settings
-
         with pytest.raises(ValidationError) as exc_info:
-            Settings()
+            importlib.reload(api.config)
 
         # The error must reference the api_key field
         error_str = str(exc_info.value)
@@ -58,14 +88,15 @@ class TestApiKeyRequiredField:
 
         A field with a default would silently allow startup with no key configured
         (fail-open). Absence of a default means pydantic raises on missing env.
+        Uses importlib.reload for deterministic proof regardless of import order.
         """
-        monkeypatch.delenv("API_KEY", raising=False)
+        import api.config
 
-        from api.config import Settings
+        monkeypatch.delenv("API_KEY", raising=False)
 
         # Must raise — no default means absent env = ValidationError
         with pytest.raises(ValidationError):
-            Settings()
+            importlib.reload(api.config)
 
     def test_api_key_not_none_not_empty(self):
         """api_key from env must be the real string, not None or empty."""
@@ -93,13 +124,16 @@ class TestDatabaseUrlRequiredField:
         API_KEY stays provisioned (conftest API_KEY setdefault unchanged) so the
         ONLY missing field at Settings() construction time is database_url.
         The ValidationError must reference 'database_url', not 'api_key'.
+
+        Uses importlib.reload(api.config) inside pytest.raises to deterministically
+        prove the contract regardless of whether api.config was already cached.
         """
+        import api.config
+
         monkeypatch.delenv("DATABASE_URL", raising=False)
 
-        from api.config import Settings
-
         with pytest.raises(ValidationError) as exc_info:
-            Settings()
+            importlib.reload(api.config)
 
         error_str = str(exc_info.value)
         assert "database_url" in error_str, (
