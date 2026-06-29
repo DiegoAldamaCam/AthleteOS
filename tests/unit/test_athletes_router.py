@@ -35,13 +35,19 @@ def _fake_db_with_rows(rows: list[tuple]) -> MagicMock:
 
 
 def _make_client(rows: list[tuple]) -> TestClient:
-    """Build a TestClient with the DB dependency overridden to return `rows`."""
+    """Build a TestClient with the DB dependency overridden to return `rows`.
+
+    Also overrides require_api_key so existing data/shape tests focus on DB
+    behavior, not auth behavior. Auth-specific tests use _make_auth_client().
+    """
     from fastapi import FastAPI
     from api.db import get_db
+    from api.security import require_api_key
 
     app = FastAPI()
     app.include_router(athletes.router)
     app.dependency_overrides[get_db] = lambda: _fake_db_with_rows(rows)
+    app.dependency_overrides[require_api_key] = lambda: None
     return TestClient(app)
 
 
@@ -95,4 +101,57 @@ def test_list_athletes_returns_sorted_athletes():
     body = resp.json()
     assert body["athletes"] == ["A1", "A2", "A3"], (
         f"Expected sorted athlete list ['A1','A2','A3'], got: {body['athletes']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# sc-1 (api-auth) — Missing X-API-Key header → 401, NOT 422 (ADR-A3, S1, S2)
+# ---------------------------------------------------------------------------
+
+
+def _make_auth_client() -> TestClient:
+    """Build a TestClient with the REAL require_api_key dep wired (NOT overridden)."""
+    from fastapi import FastAPI
+    from api.security import require_api_key
+    from api.db import get_db
+
+    app = FastAPI()
+    app.include_router(athletes.router)
+    # Override DB so the route would return data IF it gets past auth
+    app.dependency_overrides[get_db] = lambda: _fake_db_with_rows([("A1",)])
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_list_athletes_missing_key_returns_401():
+    """sc-1 (api-auth): GET /athletes without X-API-Key → 401, not 422."""
+    client = _make_auth_client()
+    resp = client.get("/athletes")
+    assert resp.status_code == 401, (
+        f"Expected 401 when X-API-Key is absent, got {resp.status_code}"
+    )
+
+
+def test_list_athletes_missing_key_not_422():
+    """S2 guard: missing key on /athletes must NOT return 422."""
+    client = _make_auth_client()
+    resp = client.get("/athletes")
+    assert resp.status_code != 422, (
+        "GET /athletes returned 422 for missing key — Header must use default=None"
+    )
+
+
+def test_list_athletes_missing_key_body_has_detail():
+    """S1 guard: 401 body must be JSON with a 'detail' key."""
+    client = _make_auth_client()
+    resp = client.get("/athletes")
+    body = resp.json()
+    assert "detail" in body, f"Expected 'detail' in 401 body, got: {body}"
+
+
+def test_list_athletes_correct_key_returns_200():
+    """sc-4: correct X-API-Key → GET /athletes returns 200."""
+    client = _make_auth_client()
+    resp = client.get("/athletes", headers={"X-API-Key": "test-api-key-fixture"})
+    assert resp.status_code == 200, (
+        f"Expected 200 with correct key, got {resp.status_code}"
     )
