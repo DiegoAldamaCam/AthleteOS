@@ -62,6 +62,9 @@ dev = [
 # fails on a clean environment ("Multiple top-level packages discovered") because
 # the repo root holds several top-level code packages plus non-code dirs (openspec,
 # tests, data). List only the real importable code packages and their subpackages.
+[project.scripts]
+dlq-replay = "tools.dlq_replay.__main__:main"
+
 [tool.setuptools.packages.find]
 include = [
   "jobs*",
@@ -70,6 +73,7 @@ include = [
   "storage*",
   "schemas*",
   "api*",
+  "tools*",
 ]
 exclude = ["tests*", "openspec*", "data*"]
 
