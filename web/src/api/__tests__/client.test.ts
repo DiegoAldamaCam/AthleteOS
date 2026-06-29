@@ -61,7 +61,7 @@ describe('apiFetch — X-API-Key header forwarding', () => {
 
     // Assert
     expect(mockFetch).toHaveBeenCalledOnce()
-    const [_url, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit]
     expect((init?.headers as Record<string, string>)?.['X-API-Key']).toBe('test-spa-key')
 
     vi.unstubAllEnvs()
@@ -86,7 +86,7 @@ describe('apiFetch — X-API-Key header forwarding', () => {
 
     // Assert
     expect(mockFetch).toHaveBeenCalledOnce()
-    const [_url, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit]
     expect((init?.headers as Record<string, string>)?.['X-API-Key']).toBe('test-spa-key')
 
     vi.unstubAllEnvs()
@@ -114,7 +114,7 @@ describe('apiFetch — X-API-Key header forwarding', () => {
 
     // Assert
     expect(mockFetch).toHaveBeenCalledOnce()
-    const [_url, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit]
     expect((init?.headers as Record<string, string>)?.['X-API-Key']).toBe('test-spa-key')
 
     vi.unstubAllEnvs()
