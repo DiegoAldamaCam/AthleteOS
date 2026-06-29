@@ -64,6 +64,7 @@ dev = [
 # tests, data). List only the real importable code packages and their subpackages.
 [project.scripts]
 dlq-replay = "tools.dlq_replay.__main__:main"
+dlq-quality = "tools.dlq_quality.__main__:main"
 
 [tool.setuptools.packages.find]
 include = [
