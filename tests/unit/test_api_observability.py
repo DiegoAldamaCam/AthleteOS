@@ -377,7 +377,11 @@ class TestRegressionContracts:
         }
 
         with patch("api.routers.pipeline.get_dlq_depths", return_value=fake_result):
-            resp = regression_client.get("/pipeline/dlq-depth")
+            # X-API-Key required now that pipeline is protected (api-auth)
+            resp = regression_client.get(
+                "/pipeline/dlq-depth",
+                headers={"X-API-Key": "test-api-key-fixture"},
+            )
 
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
         body = resp.json()

@@ -180,8 +180,12 @@ class TestGlobalExceptionHandler:
 
         FastAPI's RequestValidationError handler fires before any route handler
         or dependency executes — the broad Exception handler must not intercept it.
+        X-API-Key is required now (api-auth); auth runs first, then validation.
         """
-        resp = client.get("/athletes/A1/metrics?from=not-a-date")
+        resp = client.get(
+            "/athletes/A1/metrics?from=not-a-date",
+            headers={"X-API-Key": "test-api-key-fixture"},
+        )
         assert resp.status_code == 422, f"Expected 422, got {resp.status_code}"
 
 
