@@ -163,12 +163,18 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
     command: ["python", "-m", "bootstrap.run"]
 
-  # Placeholder ingestion watcher. PR2 will provide the real Strong CSV parser
-  # + producer (replacing this stub with a build context + entrypoint).
+  # Ingestion supervisor: runs all 6 connector watchers in daemon threads.
+  # Cross-profile note: schema-bootstrap uses profile 'bootstrap'; ingestion uses
+  # profile 'ingest'. Docker Compose does NOT auto-start cross-profile deps.
+  # Operator must run `docker compose --profile bootstrap up -d` first.
   ingestion:
-    image: python:3.12-slim
+    build:
+      context: .
+      dockerfile: ingestion/Dockerfile
     profiles: ["ingest"]
     depends_on:
+      schema-bootstrap:
+        condition: service_completed_successfully
       kafka:
         condition: service_healthy
     environment:
@@ -176,7 +182,7 @@ services:
       INGEST_WATCH_DIR: "/data/inbox"
     volumes:
       - ./data:/data
-    command: ["sleep", "infinity"]
+    restart: on-failure
 
   fastapi:
     build:
