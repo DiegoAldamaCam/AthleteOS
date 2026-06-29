@@ -21,6 +21,9 @@ import os
 # sc-9 (fail-closed proof) uses monkeypatch.delenv("API_KEY") to override
 # this provisioned value inside that test's scope, proving ValidationError fires.
 os.environ.setdefault("API_KEY", "test-api-key-fixture")
+os.environ.setdefault(
+    "DATABASE_URL", "postgresql://athleteos:test-password@localhost:5432/athleteos"
+)  # ADR-S3: module-level; integration pg_dsn wins via setdefault; sc-8, sc-9
 
 import pytest
 

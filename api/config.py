@@ -16,7 +16,10 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    database_url: str = "postgresql://athleteos:athleteos@localhost:5432/athleteos"
+    # ADR-S2: REQUIRED field, no default — missing DATABASE_URL raises ValidationError
+    # at the module-level Settings() (fail-closed). Removes the last hardcoded password
+    # from committed source. CI/dev/tests supply it via env or .env.
+    database_url: str
     kafka_bootstrap_servers: str = "localhost:9092"
     cors_origins: str = "http://localhost:5173"
     cors_allow_credentials: bool = True

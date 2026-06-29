@@ -1,14 +1,17 @@
-"""Unit tests for api/config.py — api_key required field (sc-9, ADR-A2).
+"""Unit tests for api/config.py — required fields and fail-closed semantics.
 
-Spec source: obs #314 (sdd/athleteos-api-auth/spec), sc-9.
-Design source: obs #315 (sdd/athleteos-api-auth/design), ADR-A2 (fail-closed).
+Spec sources:
+  obs #314 (sdd/athleteos-api-auth/spec), sc-9: api_key required field.
+  obs #328 (sdd/athleteos-secrets-mgmt/spec), sc-6: database_url required field.
 
-sc-9: When API_KEY env var is absent, Settings() must raise pydantic ValidationError.
+Design sources:
+  obs #315 (sdd/athleteos-api-auth/design), ADR-A2: api_key fail-closed.
+  obs #329 (sdd/athleteos-secrets-mgmt/design), ADR-S2+S3: database_url fail-closed.
 
-This test PROVES fail-closed semantics DESPITE the conftest setdefault provisioning:
-  monkeypatch.delenv("API_KEY", raising=False) removes the provisioned value inside
-  this test's scope only; monkeypatch auto-reverts after the test.
-  With API_KEY genuinely absent at construction time, ValidationError fires.
+Both tests PROVE fail-closed semantics DESPITE the conftest setdefault provisioning:
+  monkeypatch.delenv removes the provisioned value inside the test's scope only;
+  monkeypatch auto-reverts after the test.
+  With the target var genuinely absent at construction time, ValidationError fires.
 """
 
 from __future__ import annotations
@@ -72,3 +75,46 @@ class TestApiKeyRequiredField:
         assert s.api_key is not None, "api_key must not be None"
         assert isinstance(s.api_key, str), f"api_key must be str, got {type(s.api_key)}"
         assert s.api_key, "api_key must not be empty string"
+
+
+class TestDatabaseUrlRequiredField:
+    """database_url must be a REQUIRED field with no default — fail-closed (sc-6, ADR-S2).
+
+    Distinct class from TestApiKeyRequiredField per design gate S2 (obs #330):
+    separating the two classes clarifies that each field independently enforces
+    fail-closed semantics and prevents a reader from assuming one delenv affects both.
+    """
+
+    def test_missing_database_url_raises_validation_error(self, monkeypatch):
+        """sc-6: Settings() with DATABASE_URL absent → ValidationError (fail-closed).
+
+        ADR-S3: conftest setdefault provisions DATABASE_URL for the test suite.
+        monkeypatch.delenv removes it inside this test's scope only (auto-reverts).
+        API_KEY stays provisioned (conftest API_KEY setdefault unchanged) so the
+        ONLY missing field at Settings() construction time is database_url.
+        The ValidationError must reference 'database_url', not 'api_key'.
+        """
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+
+        from api.config import Settings
+
+        with pytest.raises(ValidationError) as exc_info:
+            Settings()
+
+        error_str = str(exc_info.value)
+        assert "database_url" in error_str, (
+            f"ValidationError must mention 'database_url', got: {error_str}"
+        )
+
+    def test_database_url_present_constructs_successfully(self):
+        """sc-8 triangulation: Settings() with both required vars set must not raise.
+
+        Both API_KEY and DATABASE_URL are provisioned by conftest setdefault.
+        Verifies the exact DATABASE_URL value round-trips through pydantic-settings.
+        """
+        from api.config import Settings
+
+        s = Settings()
+        assert s.database_url == "postgresql://athleteos:test-password@localhost:5432/athleteos", (
+            f"Expected test DATABASE_URL from conftest, got {s.database_url!r}"
+        )
