@@ -151,7 +151,7 @@ def redpanda_api_client(redpanda_bootstrap):
 
     from api.main import app  # noqa: PLC0415
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-API-Key": os.environ["API_KEY"]}) as client:
         yield client
 
     # Teardown: restore env and reload modules back to the restored environment
@@ -278,7 +278,7 @@ def stopped_broker_client():
 
     from api.main import app  # noqa: PLC0415
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-API-Key": os.environ["API_KEY"]}) as client:
         yield client
 
     # Teardown: restore env and reload modules back to the restored environment

@@ -145,7 +145,7 @@ def api_client(pg_dsn, seeded_db):
 
     from api.main import app  # noqa: PLC0415
 
-    with TestClient(app) as client:
+    with TestClient(app, headers={"X-API-Key": os.environ["API_KEY"]}) as client:
         yield client
 
     for key, value in _env_backup.items():
