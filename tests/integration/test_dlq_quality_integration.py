@@ -129,17 +129,17 @@ def test_full_scan_all_reports(bootstrap_servers):
     now_ms = int(time.time() * 1000)
     # One envelope per DLQ topic, distinct error_type per spec
     _produce(bootstrap_servers, _DLQ_TRAINING, _build_envelope(
-        original_topic="raw.strength",
+        original_topic="test.quality.synthetic",
         error_type="VALIDATION_FAILURE",
         timestamp=now_ms - 60_000,  # 1 minute old → <1d bucket
     ))
     _produce(bootstrap_servers, _DLQ_WELLNESS, _build_envelope(
-        original_topic="raw.wellness",
+        original_topic="test.quality.synthetic",
         error_type="LATE_DATA",
         timestamp=now_ms - 120_000,  # 2 minutes old → <1d bucket
     ))
     _produce(bootstrap_servers, _DLQ_PLANNING, _build_envelope(
-        original_topic="raw.planning",
+        original_topic="test.quality.synthetic",
         error_type="SCHEMA_INCOMPATIBILITY",
         timestamp=now_ms - 180_000,  # 3 minutes old → <1d bucket
     ))
@@ -227,12 +227,12 @@ def test_from_timestamp_scope_end_to_end(bootstrap_servers):
     cutoff_ms = now_ms - 3_600_000  # 1 hour ago
 
     _produce(bootstrap_servers, topic, _build_envelope(
-        original_topic="raw.strength",
+        original_topic="test.quality.synthetic",
         error_type="VALIDATION_FAILURE",
         timestamp=old_ts,
     ))
     _produce(bootstrap_servers, topic, _build_envelope(
-        original_topic="raw.strength",
+        original_topic="test.quality.synthetic",
         error_type="VALIDATION_FAILURE",
         timestamp=new_ts,
     ))
@@ -281,7 +281,7 @@ def test_no_producer_ever_constructed(bootstrap_servers, monkeypatch):
 
     # Produce one setup message (using real Producer BEFORE we patch it)
     _produce(bootstrap_servers, topic, _build_envelope(
-        original_topic="raw.strength",
+        original_topic="test.quality.synthetic",
         error_type="VALIDATION_FAILURE",
     ))
 
