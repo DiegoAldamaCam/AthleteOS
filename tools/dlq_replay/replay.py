@@ -51,6 +51,20 @@ def run_replay(
         if config.max_count is not None and processed_count >= config.max_count:
             break
 
+        # Ensure a per-topic counter dict exists for this DLQ source topic.
+        # sc-2, sc-21: per_topic breakdown keyed by the DLQ topic the message
+        # came from so callers can see how many messages per source queue were
+        # replayed, oversized, or unrecoverable.
+        topic_counters = report.per_topic.setdefault(
+            dlq_topic,
+            {
+                "replayed": 0,
+                "dry_run_would_replay": 0,
+                "skipped_oversized": 0,
+                "skipped_unrecoverable": 0,
+            },
+        )
+
         # sc-19, sc-20: decode envelope — corrupt → UNRECOVERABLE skip.
         try:
             envelope = decode(raw_bytes)
@@ -60,6 +74,7 @@ def run_replay(
                 dlq_topic, dlq_partition, dlq_offset, exc,
             )
             report.skipped_unrecoverable += 1
+            topic_counters["skipped_unrecoverable"] += 1
             processed_count += 1
             continue
 
@@ -77,6 +92,7 @@ def run_replay(
                 dlq_topic, dlq_partition, dlq_offset, value_size, config.max_size_bytes,
             )
             report.skipped_oversized += 1
+            topic_counters["skipped_oversized"] += 1
             processed_count += 1
             continue
 
@@ -90,6 +106,7 @@ def run_replay(
                 dlq_topic, dlq_partition, dlq_offset, original_topic,
             )
             report.skipped_unrecoverable += 1
+            topic_counters["skipped_unrecoverable"] += 1
             processed_count += 1
             continue
 
@@ -102,7 +119,9 @@ def run_replay(
                 dlq_topic, dlq_partition, dlq_offset, original_topic,
             )
 
-        # Produce or dry-run.
+        # Produce or dry-run; accumulate per-topic counter to match the global one.
+        pre_replayed = report.replayed
+        pre_dry_run = report.dry_run_would_replay
         producer.produce(
             topic=original_topic,
             key=original_key,
@@ -110,6 +129,13 @@ def run_replay(
             report=report,
             dry_run=config.dry_run,
         )
+        # Mirror whichever global counter the producer incremented.
+        if report.replayed > pre_replayed:
+            topic_counters["replayed"] += report.replayed - pre_replayed
+        if report.dry_run_would_replay > pre_dry_run:
+            topic_counters["dry_run_would_replay"] += (
+                report.dry_run_would_replay - pre_dry_run
+            )
         processed_count += 1
 
     producer.flush()

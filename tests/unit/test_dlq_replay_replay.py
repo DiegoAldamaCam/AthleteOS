@@ -289,3 +289,88 @@ def test_dry_run_passes_dry_run_true_to_producer():
     producer.produce.assert_called_once()
     call_kwargs = producer.produce.call_args[1]
     assert call_kwargs["dry_run"] is True
+
+
+# ---------------------------------------------------------------------------
+# CRIT-V1 (behavior): run_replay must populate report.per_topic
+# These tests drive real messages through run_replay (public entry point)
+# and assert per_topic is populated by the function — NOT set manually in
+# the test body.  The existing tests all set per_topic by hand on a bare
+# ReplayReport; these tests never touch report.per_topic directly.
+# ---------------------------------------------------------------------------
+
+def test_run_replay_populates_per_topic_replayed():
+    """run_replay must accumulate per-topic replayed counts in report.per_topic.
+
+    Drives two valid messages from the same DLQ topic through run_replay and
+    asserts that report.per_topic is non-empty and carries the correct count.
+    This is a BEHAVIOR test — the test never sets per_topic itself.
+    """
+    cfg = _make_config(dry_run=False)
+
+    # Two valid envelopes from the same DLQ topic
+    env1 = _make_envelope(original_topic="raw.strength", original_key="K1")
+    env2 = _make_envelope(original_topic="raw.cardio", original_key="K2")
+
+    # Consumer returns tuples with a concrete dlq_topic so we can assert on it
+    consumer = MagicMock()
+    consumer.iter_messages.return_value = iter([
+        (env1, "dlq.raw.strength", 0, 0),
+        (env2, "dlq.raw.cardio", 0, 1),
+    ])
+
+    # Real producer mock that actually increments report.replayed
+    producer = MagicMock()
+    def _real_produce(topic, key, value, report, dry_run):
+        report.replayed += 1
+    producer.produce.side_effect = _real_produce
+    producer.flush = MagicMock()
+
+    report = run_replay(cfg, consumer, producer)
+
+    # per_topic must be populated by run_replay — never set manually in this test
+    assert report.per_topic != {}, (
+        "run_replay did not populate per_topic — CRIT-V1: the feature is a ghost"
+    )
+    # Each DLQ topic must appear with at least the 'replayed' counter
+    assert "dlq.raw.strength" in report.per_topic, (
+        "dlq.raw.strength not found in per_topic"
+    )
+    assert "dlq.raw.cardio" in report.per_topic, (
+        "dlq.raw.cardio not found in per_topic"
+    )
+    assert report.per_topic["dlq.raw.strength"].get("replayed", 0) == 1
+    assert report.per_topic["dlq.raw.cardio"].get("replayed", 0) == 1
+
+
+def test_run_replay_per_topic_tracks_unrecoverable():
+    """run_replay must record per-topic skipped_unrecoverable counts.
+
+    A corrupt envelope and an oversized message both come from the same DLQ
+    topic; per_topic must show those counters for that topic.
+    This test never touches report.per_topic directly.
+    """
+    cfg = _make_config(dry_run=False, max_size_bytes=5)
+
+    corrupt = b"not json"
+    oversized = _make_envelope(original_value=b"x" * 100)  # > max_size_bytes=5
+
+    consumer = MagicMock()
+    consumer.iter_messages.return_value = iter([
+        (corrupt,   "dlq.raw.strength", 0, 0),
+        (oversized, "dlq.raw.strength", 0, 1),
+    ])
+
+    producer = MagicMock()
+    producer.flush = MagicMock()
+
+    report = run_replay(cfg, consumer, producer)
+
+    assert report.per_topic != {}, "per_topic must be non-empty after run_replay"
+    topic_counters = report.per_topic.get("dlq.raw.strength", {})
+    assert topic_counters.get("skipped_unrecoverable", 0) >= 1, (
+        "per_topic[dlq.raw.strength][skipped_unrecoverable] must be >= 1"
+    )
+    assert topic_counters.get("skipped_oversized", 0) >= 1, (
+        "per_topic[dlq.raw.strength][skipped_oversized] must be >= 1"
+    )

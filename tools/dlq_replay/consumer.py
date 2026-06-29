@@ -147,9 +147,13 @@ class DLQConsumer:
             while len(done) < len(all_tps):
                 msg = consumer.poll(timeout=1.0)
                 if msg is None:
-                    # No message received; check if all partitions are done.
-                    # (Handles case where poll returns None after HWM is reached.)
-                    break
+                    # Transient empty poll (broker latency, rebalance, etc.).
+                    # ADR-1: only terminate when ALL partitions have reached their
+                    # snapshotted HWM.  If any partition is still below its HWM,
+                    # continue polling — do NOT break early and drop messages.
+                    if len(done) >= len(all_tps):
+                        break
+                    continue
 
                 if msg.error():
                     logger.error("Consumer error: %s", msg.error())

@@ -270,7 +270,9 @@ def test_adr7_mixed_partitions_only_valid_assigned():
     mock_instance.list_topics.return_value = topics_meta
 
     def get_wm(tp, timeout=10, cached=False):
-        return (0, 2) if tp.partition == 1 else (0, 2)
+        # partition 0: ADR-7 guard will mark it done (offset=-1 from offsets_for_times)
+        # partition 1: HWM hi=1 → one message at offset 0, then done
+        return (0, 1) if tp.partition == 1 else (0, 2)
 
     mock_instance.get_watermark_offsets.side_effect = get_wm
 
@@ -298,3 +300,109 @@ def test_adr7_mixed_partitions_only_valid_assigned():
     assigned_partitions = [tp.partition for tp in assigned_tps]
     assert 0 not in assigned_partitions
     assert 1 in assigned_partitions
+
+
+# ---------------------------------------------------------------------------
+# CRIT-V2 (behavior): transient mid-stream None must NOT terminate consumption
+# when partitions are still below their snapshotted HWM.
+# The current implementation does `if msg is None: break` — which drops all
+# remaining messages after the first transient empty poll.
+# This test injects: msg, msg, None (transient), msg, msg with HWM=4
+# and asserts all 4 real messages are yielded.
+# ---------------------------------------------------------------------------
+
+def test_transient_none_mid_stream_does_not_drop_remaining_messages():
+    """A transient empty poll (None) mid-stream must not terminate iteration
+    when partitions are still below their snapshotted HWM.
+
+    Sequence: msg@0, msg@1, None (transient — broker latency), msg@2, msg@3
+    HWM = 4  (hi=4, meaning offsets 0-3 exist)
+    Expected: all 4 real messages are yielded.
+    The current `if msg is None: break` drops msg@2 and msg@3 — this test
+    exposes that bug.
+    """
+    p0 = _FakeTopicPartition("dlq.canonical.training_event", 0, offset=0)
+
+    mock_cls = MagicMock()
+    mock_instance = MagicMock()
+    mock_cls.return_value = mock_instance
+
+    topic_name = "dlq.canonical.training_event"
+    pm0 = MagicMock()
+    pm0.id = 0
+    topic_meta = MagicMock()
+    topic_meta.partitions = {0: pm0}
+    topics_meta = MagicMock()
+    topics_meta.topics = {topic_name: topic_meta}
+    mock_instance.list_topics.return_value = topics_meta
+
+    # HWM: lo=0, hi=4 (4 messages at offsets 0,1,2,3)
+    mock_instance.get_watermark_offsets.return_value = (0, 4)
+
+    msg0 = _make_mock_message(b'msg0', offset=0, partition=0, topic=topic_name)
+    msg1 = _make_mock_message(b'msg1', offset=1, partition=0, topic=topic_name)
+    msg2 = _make_mock_message(b'msg2', offset=2, partition=0, topic=topic_name)
+    msg3 = _make_mock_message(b'msg3', offset=3, partition=0, topic=topic_name)
+
+    # Inject a transient None after the 2nd message — BEFORE HWM is reached
+    mock_instance.poll.side_effect = [msg0, msg1, None, msg2, msg3]
+
+    with patch("tools.dlq_replay.consumer.ConfluentConsumer", mock_cls):
+        cfg = _make_config()
+        consumer = DLQConsumer(config=cfg)
+        messages = list(consumer.iter_messages())
+
+    # Must yield ALL 4 messages despite the transient None at position 3
+    assert len(messages) == 4, (
+        f"Expected 4 messages but got {len(messages)}: "
+        f"transient None mid-stream dropped remaining messages (CRIT-V2)"
+    )
+    values = [m[0] for m in messages]
+    assert b'msg0' in values
+    assert b'msg1' in values
+    assert b'msg2' in values
+    assert b'msg3' in values
+    mock_instance.close.assert_called_once()
+
+
+def test_none_after_hwm_reached_terminates_cleanly():
+    """When all partitions have reached HWM, a trailing None terminates cleanly.
+
+    Triangulation: verifies that the fix (continue on None while below HWM)
+    still correctly stops when the HWM IS actually reached.
+    HWM=2, messages at offsets 0 and 1 → after msg@1 is processed, partition
+    is done. The poll sequence then returns None — should stop (no infinite loop).
+    """
+    p0 = _FakeTopicPartition("dlq.canonical.training_event", 0, offset=0)
+
+    mock_cls = MagicMock()
+    mock_instance = MagicMock()
+    mock_cls.return_value = mock_instance
+
+    topic_name = "dlq.canonical.training_event"
+    pm0 = MagicMock()
+    pm0.id = 0
+    topic_meta = MagicMock()
+    topic_meta.partitions = {0: pm0}
+    topics_meta = MagicMock()
+    topics_meta.topics = {topic_name: topic_meta}
+    mock_instance.list_topics.return_value = topics_meta
+
+    # HWM: lo=0, hi=2 (2 messages at offsets 0 and 1)
+    mock_instance.get_watermark_offsets.return_value = (0, 2)
+
+    msg0 = _make_mock_message(b'done0', offset=0, partition=0, topic=topic_name)
+    msg1 = _make_mock_message(b'done1', offset=1, partition=0, topic=topic_name)
+
+    # After both messages at HWM, a trailing None should terminate
+    mock_instance.poll.side_effect = [msg0, msg1, None]
+
+    with patch("tools.dlq_replay.consumer.ConfluentConsumer", mock_cls):
+        cfg = _make_config()
+        consumer = DLQConsumer(config=cfg)
+        messages = list(consumer.iter_messages())
+
+    assert len(messages) == 2
+    assert messages[0][0] == b'done0'
+    assert messages[1][0] == b'done1'
+    mock_instance.close.assert_called_once()
