@@ -61,10 +61,15 @@ class TestComposeVariableSubstitution:
         temp_env.write_text(test_env_content, encoding="utf-8")
 
         # Run 'docker compose config' with the temp .env as the env file source.
-        # Pass an explicit -f <compose file> so compose always loads THIS project's
-        # docker-compose.yml regardless of the working directory or auto-detection
-        # quirks across compose versions (without -f, some runners resolved an
-        # empty project — "services: {}"). --env-file supplies the substitution vars.
+        # - Explicit -f <compose file> so compose loads THIS project's file regardless
+        #   of working directory / auto-detection quirks across compose versions.
+        # - Every service in this compose file is gated behind a `profiles:` entry.
+        #   Without an active profile, compose omits ALL services and renders
+        #   "services: {}". The three secret-bearing services live in these profiles:
+        #     postgres -> "core", fastapi -> "serve", grafana -> "observability".
+        #   Activating them explicitly (portable across compose v2 versions, unlike
+        #   the `--profile "*"` wildcard) makes the ${VAR} substitution observable.
+        # - --env-file supplies the substitution vars.
         compose_file = REPO_ROOT / "docker-compose.yml"
 
         result = subprocess.run(
@@ -73,6 +78,12 @@ class TestComposeVariableSubstitution:
                 "compose",
                 "-f",
                 str(compose_file),
+                "--profile",
+                "core",
+                "--profile",
+                "serve",
+                "--profile",
+                "observability",
                 "--env-file",
                 str(temp_env),
                 "config",
