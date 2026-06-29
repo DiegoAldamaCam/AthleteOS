@@ -37,6 +37,36 @@ from typing import Any, Callable, Optional
 
 
 # ---------------------------------------------------------------------------
+# DDL injection guard (import-safe — no pyflink at module level)
+# ---------------------------------------------------------------------------
+
+# Characters that must never appear in DDL-interpolated config values.
+# A single quote closes an SQL string literal; double quote, newline (LF/CR),
+# and null byte enable multi-line or parser-confusion injection into the
+# Flink Table DDL f-string (_ddl_source). This is an allowlist-based guard:
+# if the value contains ANY of these characters it is unconditionally rejected
+# with a ValueError before it can reach t_env.execute_sql. (RISK F8)
+_DDL_FORBIDDEN_CHARS: str = "'\"\n\r\x00"
+
+
+def _validate_ddl_config_field(field_name: str, value: str) -> None:
+    """Reject values that contain SQL/DDL injection characters.
+
+    Raises ValueError with the field name so the caller can identify which
+    config parameter is problematic. Called in WellnessMetricsJobConfig.__post_init__
+    for every field that is interpolated into the source DDL f-string. (RISK F8)
+    """
+    for ch in _DDL_FORBIDDEN_CHARS:
+        if ch in value:
+            raise ValueError(
+                f"WellnessMetricsJobConfig.{field_name} contains a character that is "
+                f"forbidden in DDL interpolation (char ord={ord(ch):#04x}). "
+                f"Accepted characters: printable ASCII excluding '\"\\n\\r\\x00. "
+                f"Received value (first 80 chars): {value[:80]!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
 # Job configuration (import-safe — no pyflink at module level)
 # ---------------------------------------------------------------------------
 
@@ -58,6 +88,18 @@ class WellnessMetricsJobConfig:
     hrv_baseline_default: float = 60.0  # ADR-18: fixed MVP baseline
     bounded: bool = False  # True for integration tests (bounded source)
     parallelism: int = 1
+
+    def __post_init__(self) -> None:
+        # DDL injection guard (RISK F8): validate all fields interpolated into
+        # the _ddl_source f-string before the job can reach t_env.execute_sql.
+        # Note: kafka_bootstrap_servers (NOT bootstrap_servers) is the correct
+        # field name for this dataclass. group_id IS interpolated as
+        # properties.group.id in _ddl_source (line 125 before this change),
+        # so it MUST be validated here (unlike F2-F7 which are sink DDLs).
+        _validate_ddl_config_field("kafka_bootstrap_servers", self.kafka_bootstrap_servers)
+        _validate_ddl_config_field("schema_registry_url", self.schema_registry_url)
+        _validate_ddl_config_field("canonical_topic", self.canonical_topic)
+        _validate_ddl_config_field("group_id", self.group_id)
 
 
 # ---------------------------------------------------------------------------
