@@ -152,8 +152,8 @@ def test_report_age_only_feeds_age_agg():
          patch("time.time", return_value=5_000_000):
         result = scan(cfg)
 
-    # Age data populated
-    assert len(result.age) > 0 or result.scanned >= 0  # age scan ran
+    # Age data populated (tightened: removed always-true `or scanned >= 0` clause)
+    assert len(result.age) > 0, f"age section should be populated; got {result.age}"
     # error-type and triage must be empty (not selected)
     assert result.error_type == {}, f"error_type should be empty for --report age; got {result.error_type}"
     assert result.triage_fix == {}, f"triage_fix should be empty for --report age; got {result.triage_fix}"
