@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     cors_allow_credentials: bool = True
     kafka_admin_request_timeout: float = 5.0  # seconds; env var: KAFKA_ADMIN_REQUEST_TIMEOUT
     db_connect_timeout: float = 5.0  # seconds; env var: DB_CONNECT_TIMEOUT
+    # ADR-A2: REQUIRED field with NO default — absence of API_KEY env var raises
+    # pydantic ValidationError at Settings() construction (import time), ensuring
+    # the application fails closed rather than starting with no authentication key.
+    api_key: str
 
     @property
     def cors_origins_list(self) -> list[str]:

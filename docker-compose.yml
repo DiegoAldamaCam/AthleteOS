@@ -198,6 +198,8 @@ services:
       DATABASE_URL: "postgresql://athleteos:athleteos@postgres:5432/athleteos"
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
       CORS_ORIGINS: "http://localhost:5173"
+      # Placeholder for local dev only — replace with a real secret in production.
+      API_KEY: "dev-replace-me"
     ports:
       - "8000:8000"
     healthcheck:

@@ -27,3 +27,96 @@ describe('client.ts — VITE_API_BASE_URL hard-fail', () => {
     vi.unstubAllEnvs()
   })
 })
+
+// ---------------------------------------------------------------------------
+// Spec: sdd/athleteos-api-auth (sc-10, sc-11, sc-12)
+// apiFetch() — X-API-Key header forwarding
+// ---------------------------------------------------------------------------
+// Each test stubs VITE_API_KEY and asserts that fetch() was called with the
+// X-API-Key header. Pattern: vi.stubEnv → vi.resetModules → dynamic import →
+// mock global.fetch → call function → assert header.
+// ---------------------------------------------------------------------------
+
+describe('apiFetch — X-API-Key header forwarding', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  it('sc-10: fetchAthletes sends X-API-Key header', async () => {
+    // Arrange
+    vi.stubEnv('VITE_API_BASE_URL', 'http://test.local')
+    vi.stubEnv('VITE_API_KEY', 'test-spa-key')
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ athletes: ['A1'] }),
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(globalThis as any).fetch = mockFetch
+
+    const { fetchAthletes } = await import('../client')
+
+    // Act
+    await fetchAthletes()
+
+    // Assert
+    expect(mockFetch).toHaveBeenCalledOnce()
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+    expect((init?.headers as Record<string, string>)?.['X-API-Key']).toBe('test-spa-key')
+
+    vi.unstubAllEnvs()
+  })
+
+  it('sc-11: fetchMetrics sends X-API-Key header', async () => {
+    // Arrange
+    vi.stubEnv('VITE_API_BASE_URL', 'http://test.local')
+    vi.stubEnv('VITE_API_KEY', 'test-spa-key')
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(globalThis as any).fetch = mockFetch
+
+    const { fetchMetrics } = await import('../client')
+
+    // Act
+    await fetchMetrics('alice')
+
+    // Assert
+    expect(mockFetch).toHaveBeenCalledOnce()
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+    expect((init?.headers as Record<string, string>)?.['X-API-Key']).toBe('test-spa-key')
+
+    vi.unstubAllEnvs()
+  })
+
+  it('sc-12: fetchDlqDepth sends X-API-Key header', async () => {
+    // Arrange
+    vi.stubEnv('VITE_API_BASE_URL', 'http://test.local')
+    vi.stubEnv('VITE_API_KEY', 'test-spa-key')
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        broker_reachable: true,
+        topics: [],
+      }),
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(globalThis as any).fetch = mockFetch
+
+    const { fetchDlqDepth } = await import('../client')
+
+    // Act
+    await fetchDlqDepth()
+
+    // Assert
+    expect(mockFetch).toHaveBeenCalledOnce()
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit]
+    expect((init?.headers as Record<string, string>)?.['X-API-Key']).toBe('test-spa-key')
+
+    vi.unstubAllEnvs()
+  })
+})

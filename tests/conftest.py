@@ -13,6 +13,15 @@ from __future__ import annotations
 
 import os
 
+# Provision API_KEY before any test module is collected/imported.
+# This guarantees api.config.Settings() succeeds in every reload/direct
+# construction site in the unit suite, without requiring a fixture (fixtures
+# run too late — module-level code executes during collection).
+# setdefault (not =) means a real CI/dev API_KEY in the environment wins.
+# sc-9 (fail-closed proof) uses monkeypatch.delenv("API_KEY") to override
+# this provisioned value inside that test's scope, proving ValidationError fires.
+os.environ.setdefault("API_KEY", "test-api-key-fixture")
+
 import pytest
 
 

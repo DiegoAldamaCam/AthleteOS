@@ -10,7 +10,9 @@ if (!_apiBaseRaw) {
 const API_BASE = _apiBaseRaw
 
 async function apiFetch<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`)
+  const res = await fetch(`${API_BASE}${path}`, {
+    headers: { 'X-API-Key': import.meta.env.VITE_API_KEY as string },
+  })
   if (!res.ok) {
     throw new Error(`API error ${res.status}: ${res.statusText}`)
   }

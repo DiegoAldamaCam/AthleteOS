@@ -29,6 +29,10 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+# web/.env contains only non-secret dev placeholders (VITE_* build-time vars).
+# The actual secret value for VITE_API_KEY must be supplied in CI and is never
+# committed here; this tracked file holds only the placeholder for local dev.
+!web/.env
 
 # Local data / warehouses (never commit data)
 warehouse/
