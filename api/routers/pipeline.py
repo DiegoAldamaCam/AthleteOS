@@ -15,11 +15,12 @@ Business rules (LOCKED):
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from api.config import settings
 from api.kafka_admin import get_dlq_depths
 from api.observability import DLQ_COLLECTOR, update_dlq_gauge
+from api.security import require_api_key
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -37,6 +38,7 @@ DLQ_TOPICS = [
 @router.get(
     "/dlq-depth",
     summary="Get unprocessed message count for each DLQ topic",
+    dependencies=[Depends(require_api_key)],
 )
 def get_dlq_depth() -> dict:
     """Return the current DLQ depth for each tracked topic.
