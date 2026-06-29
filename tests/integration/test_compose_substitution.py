@@ -61,17 +61,26 @@ class TestComposeVariableSubstitution:
         temp_env.write_text(test_env_content, encoding="utf-8")
 
         # Run 'docker compose config' with the temp .env as the env file source.
-        # COMPOSE_ENV_FILES overrides the default .env lookup (compose >= v2.24).
-        # Fallback: write to a standard location and pass --env-file.
-        run_env = os.environ.copy()
-        run_env["COMPOSE_ENV_FILES"] = str(temp_env)
+        # Pass an explicit -f <compose file> so compose always loads THIS project's
+        # docker-compose.yml regardless of the working directory or auto-detection
+        # quirks across compose versions (without -f, some runners resolved an
+        # empty project — "services: {}"). --env-file supplies the substitution vars.
+        compose_file = REPO_ROOT / "docker-compose.yml"
 
         result = subprocess.run(
-            ["docker", "compose", "--env-file", str(temp_env), "config"],
+            [
+                "docker",
+                "compose",
+                "-f",
+                str(compose_file),
+                "--env-file",
+                str(temp_env),
+                "config",
+            ],
             capture_output=True,
             text=True,
             cwd=REPO_ROOT,
-            env=run_env,
+            env=os.environ.copy(),
         )
 
         assert result.returncode == 0, (
