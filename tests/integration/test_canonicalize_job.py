@@ -421,6 +421,139 @@ def test_canonicalize_job_e2e_valid_dlq_dedup(redpanda_endpoints):
     )
 
 
+def test_malformed_json_routes_to_dlq_transform_error(redpanda_endpoints):
+    """sc-7: malformed JSON in raw.strength MUST route to DLQ with error_type=TRANSFORM_ERROR.
+
+    Before WU-2 wiring: the inline lambda ``json.loads(raw).get("event_id")``
+    raises JSONDecodeError in the KeySelector thread → subtask crash → restart
+    loop → this test FAILS (job errors out / never reaches DLQ cleanly).
+
+    After WU-2 wiring: ``_key_by_event_id`` returns ``""`` on malformed input →
+    record reaches ``CanonicalizeProcessFunction.process_element`` keyed by ``""``
+    → process_element re-parses raw JSON → catches (TypeError, ValueError) →
+    emits ``build_dlq_envelope(error_type=TRANSFORM_ERROR)`` → DLQ receives
+    exactly one envelope → assertion passes.
+
+    No job restart or uncaught exception may occur (``no_restart=True`` in config;
+    if the job errors, the thread captures it and the test fails).
+    """
+    bootstrap_servers = redpanda_endpoints["bootstrap_servers"]
+    registry_url = redpanda_endpoints["schema_registry_url"]
+
+    # --- Runtime probe: Kafka connector JARs loadable? ----------------------
+    try:
+        from pyflink.datastream import StreamExecutionEnvironment
+        from pyflink.datastream.connectors.kafka import KafkaSource
+
+        env_probe = StreamExecutionEnvironment.get_execution_environment()
+        KafkaSource.builder()
+        del env_probe
+    except TypeError as exc:
+        pytest.skip(
+            "Kafka connector JARs not loadable by the pyflink gateway; "
+            f"underlying error: {exc}"
+        )
+
+    # --- Isolated per-run topic names ---------------------------------------
+    run_id = uuid.uuid4().hex[:8]
+    raw_topic = f"raw.strength.sc7.{run_id}"
+    canonical_topic = f"canonical.training_event.sc7.{run_id}"
+    dlq_topic = f"dlq.canonical.training_event.sc7.{run_id}"
+    subject = f"{canonical_topic}-value"
+
+    from bootstrap.register_schemas import set_compatibility
+    set_compatibility(registry_url, subject, "BACKWARD")
+    schema_version = 1
+
+    _create_topics(bootstrap_servers, [raw_topic, canonical_topic, dlq_topic])
+
+    # --- Produce one malformed (non-JSON) record ----------------------------
+    # This is the sc-7 stimulus: a record that cannot be parsed by json.loads.
+    # The key_by guard must return "" instead of raising, routing the record
+    # through process_element → JSON re-parse → TRANSFORM_ERROR → DLQ.
+    malformed_value = b"not-valid-json{"
+    produce_records(bootstrap_servers, raw_topic, [malformed_value])
+
+    # --- Run bounded canonicalize job ---------------------------------------
+    from jobs.canonicalize.main import CanonicalizeJobConfig, run
+
+    config = CanonicalizeJobConfig(
+        bootstrap_servers=bootstrap_servers,
+        schema_registry_url=registry_url,
+        group_id=f"canonicalize-sc7-{run_id}",
+        raw_topic=raw_topic,
+        canonical_topic=canonical_topic,
+        dlq_topic=dlq_topic,
+        checkpoint_interval_ms=_CHECKPOINT_MS,
+        schema_version=schema_version,
+        bounded=True,
+        parallelism=1,
+        no_restart=True,
+    )
+
+    outcome: dict = {}
+
+    def _run_job():
+        try:
+            run(config)
+            outcome["done"] = True
+        except BaseException as exc:  # noqa: BLE001
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_run_job, daemon=True)
+    worker.start()
+    worker.join(timeout=_JOB_RUN_TIMEOUT_S)
+    if worker.is_alive():
+        pytest.fail(
+            f"sc-7: canonicalize job did not terminate within {_JOB_RUN_TIMEOUT_S}s "
+            "(bounded source should drain and env.execute() should return)"
+        )
+    if not outcome.get("done"):
+        exc = outcome.get("error")
+        raise AssertionError(
+            f"sc-7: job raised an exception instead of routing malformed record to DLQ "
+            f"(key_by guard may not be wired — inline lambda crashed the job): {exc}"
+        ) from exc if exc else AssertionError("sc-7: job finished with no result")
+
+    # --- Assert DLQ received exactly one TRANSFORM_ERROR envelope -----------
+    dlq_msgs = consume_exact(
+        bootstrap_servers, dlq_topic, n=None, timeout=_CONSUME_TIMEOUT_S
+    )
+    assert len(dlq_msgs) == 1, (
+        f"sc-7: expected exactly one DLQ envelope for the malformed record, "
+        f"got {len(dlq_msgs)}"
+    )
+    dlq_record = json.loads(dlq_msgs[0].value().decode("utf-8"))
+
+    assert dlq_record.get("error_type") == "TRANSFORM_ERROR", (
+        f"sc-7: malformed JSON must route to DLQ as TRANSFORM_ERROR, "
+        f"got error_type={dlq_record.get('error_type')!r} — "
+        f"full envelope: {dlq_record}"
+    )
+    assert dlq_record.get("error_message"), (
+        "sc-7: DLQ envelope must carry a non-empty error_message"
+    )
+    assert dlq_record.get("original_topic") == raw_topic, (
+        f"sc-7: DLQ envelope original_topic must be {raw_topic!r}, "
+        f"got {dlq_record.get('original_topic')!r}"
+    )
+    # original_value is base64-encoded bytes of the raw malformed payload
+    decoded_original = base64.b64decode(dlq_record["original_value"])
+    assert decoded_original == malformed_value, (
+        f"sc-7: DLQ original_value must round-trip the malformed raw bytes; "
+        f"got {decoded_original!r}"
+    )
+
+    # --- No canonical record must be produced for a malformed input ---------
+    canonical_msgs = consume_exact(
+        bootstrap_servers, canonical_topic, n=None, timeout=10
+    )
+    assert len(canonical_msgs) == 0, (
+        f"sc-7: malformed input must NOT produce a canonical record; "
+        f"got {len(canonical_msgs)} canonical message(s)"
+    )
+
+
 # --- HTTP / Kafka IO helpers -------------------------------------------------
 
 
