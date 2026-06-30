@@ -43,11 +43,24 @@ _ROWS = (
 )
 
 
-def _consume_n(bootstrap_servers: str, topic: str, n: int, timeout: float = 30.0):
+def _consume_n(
+    bootstrap_servers: str,
+    topic: str,
+    n: int,
+    timeout: float = 30.0,
+    key_filter: str | None = None,
+):
     """Consume exactly ``n`` messages from ``topic`` or raise on timeout.
 
     Uses a unique consumer group and ``auto.offset.reset=earliest`` so the test
     reads from the start of the topic regardless of prior committed offsets.
+
+    ``raw.strength`` is a SHARED, fixed-name topic on the session-scoped broker.
+    Without filtering, this helper would take the first ``n`` records on the
+    topic — which may be records produced by an unrelated test that ran earlier,
+    causing cross-test contamination flakiness. When ``key_filter`` is provided,
+    records whose key does not match are drained and ignored, so the helper
+    returns only the ``n`` records this test produced.
     """
     from confluent_kafka import Consumer
 
@@ -69,11 +82,22 @@ def _consume_n(bootstrap_servers: str, topic: str, n: int, timeout: float = 30.0
                 continue
             if msg.error():
                 continue  # ignore transient broker errors during startup
+            if key_filter is not None:
+                raw_key = msg.key()
+                key = (
+                    raw_key.decode("utf-8")
+                    if isinstance(raw_key, (bytes, bytearray))
+                    else raw_key
+                )
+                if key != key_filter:
+                    continue  # drain unrelated records (cross-test isolation)
             messages.append(msg)
     finally:
         consumer.close()
     assert len(messages) == n, (
-        f"expected {n} messages on {topic}, got {len(messages)} within {timeout}s"
+        f"expected {n} messages on {topic}"
+        + (f" with key {key_filter!r}" if key_filter is not None else "")
+        + f", got {len(messages)} within {timeout}s"
     )
     return messages
 
@@ -93,7 +117,7 @@ def test_csv_drop_lands_envelopes_in_raw_strength(redpanda_endpoints, tmp_path):
     assert summary.published == 2
     assert summary.skipped == 0
 
-    messages = _consume_n(bootstrap, "raw.strength", n=2)
+    messages = _consume_n(bootstrap, "raw.strength", n=2, key_filter="athlete-123")
 
     envelopes = []
     for msg in messages:
