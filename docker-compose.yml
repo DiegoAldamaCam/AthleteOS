@@ -175,6 +175,12 @@ services:
     depends_on:
       schema-bootstrap:
         condition: service_completed_successfully
+        # Optional cross-profile dependency: schema-bootstrap lives in the
+        # 'bootstrap' profile while ingestion lives in 'ingest'. Marking it
+        # required:false lets Compose render a valid project when 'ingest' is
+        # started without 'bootstrap' (the dep is silently dropped), while still
+        # enforcing completion order when both profiles are active together.
+        required: false
       kafka:
         condition: service_healthy
     environment:
