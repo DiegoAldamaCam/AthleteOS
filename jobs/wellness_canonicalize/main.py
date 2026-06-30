@@ -191,6 +191,7 @@ def run(config: WellnessCanonicalizeJobConfig) -> None:  # pragma: no cover - fl
     )
 
     from jobs.wellness_canonicalize.transform import (
+        _key_by_event_id,
         build_dlq_envelope,
         select_dlq_error_type,
         transform_wellness_to_canonical,
@@ -359,7 +360,7 @@ def run(config: WellnessCanonicalizeJobConfig) -> None:  # pragma: no cover - fl
     # --- transform pipeline -------------------------------------------------
     transformed = (
         raw_stream
-        .key_by(lambda raw: json.loads(raw).get("event_id") or "")
+        .key_by(_key_by_event_id)
         .process(
             WellnessCanonicalizeProcessFunction(canonical_field_names, schema_version),
             output_type=canonical_row_type,
