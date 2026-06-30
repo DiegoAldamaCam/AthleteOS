@@ -154,7 +154,15 @@ class TestUsersDdlSchema:
 
     def test_username_unique_constraint(self, pg_conn):
         """sc-2: username column has a UNIQUE constraint."""
-        # Insert a row, then attempt to insert with the same username → should raise.
+        # Insert a row, then attempt to insert the same username again → the
+        # second insert must raise a UNIQUE violation. Both inserts run on the
+        # fixture connection; the duplicate insert is wrapped so we can roll the
+        # transaction back afterward and leave pg_conn usable. (A second
+        # psycopg2.connect() is avoided on purpose: psycopg2 redacts the password
+        # from conn.dsn, so reconnecting from it fails authentication rather than
+        # exercising the constraint.)
+        import psycopg2.errors
+
         from api.jwt_utils import hash_password
 
         _apply_users_ddl(pg_conn)
@@ -165,22 +173,15 @@ class TestUsersDdlSchema:
                 "ON CONFLICT DO NOTHING",
                 ("sc2_test_user", hash_password("pwd")),
             )
+        pg_conn.commit()
 
-        with pytest.raises(Exception) as exc_info:
-            # Use a fresh connection in manual-commit mode to isolate the conflict
-            import psycopg2
-
-            pg_dsn = pg_conn.dsn
-            conn2 = psycopg2.connect(pg_dsn)
-            try:
-                with conn2.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO users (username, password_hash) VALUES (%s, %s)",
-                        ("sc2_test_user", hash_password("other")),
-                    )
-                conn2.commit()
-            finally:
-                conn2.close()
+        with pytest.raises(psycopg2.errors.UniqueViolation) as exc_info:
+            with pg_conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO users (username, password_hash) VALUES (%s, %s)",
+                    ("sc2_test_user", hash_password("other")),
+                )
+        pg_conn.rollback()  # clear the aborted transaction so the connection stays usable
 
         assert "unique" in str(exc_info.value).lower() or "duplicate" in str(exc_info.value).lower(), (
             f"Expected UNIQUE violation error, got: {exc_info.value}"
