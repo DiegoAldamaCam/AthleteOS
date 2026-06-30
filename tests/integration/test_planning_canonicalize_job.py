@@ -6,7 +6,7 @@ End-to-end test of the planning_canonicalize bounded Flink job:
       -> bounded watermark + epoch-ms event-time assigner
       -> key_by(athlete_id)
       -> PlanningCanonicalizeProcessFunction
-           (event_id ValueState<bool> 7d TTL — NO block_id state per ADR-20
+           (event_id MapState<event_id, bool> 7d TTL — NO block_id state per ADR-20
             + transform + validate → yield canonical Row | yield DLQ side output)
       -> canonical Row → avro-confluent Table sink → canonical.planning_block
       -> DLQ → KafkaSink(JSON, AT_LEAST_ONCE) → dlq.canonical.planning_block
@@ -14,8 +14,8 @@ End-to-end test of the planning_canonicalize bounded Flink job:
 Spec scenarios covered:
   PL2-1: two events for same (athlete_id, block_id) with DIFFERENT event_id and
           ingest_time → TWO rows in canonical.planning_block (versioning, not dedup)
-  PL2-2: two events with the SAME event_id → only ONE canonical event emitted
-          (event_id dedup ValueState 7d TTL)
+   PL2-2: two events with the SAME event_id → only ONE canonical event emitted
+          (event_id dedup MapState<event_id, bool> 7d TTL)
   PL2-3: two blocks with overlapping date ranges same athlete → BOTH emitted
           (no overlap validation per BR-2 / ADR-20)
   PL2-9: first schema registration under canonical.planning_block-value succeeds
@@ -375,7 +375,7 @@ def test_planning_canonicalize_versioning_and_dedup(redpanda_endpoints):
         ingest_time=_INGEST_TIME_B,
     )
     # PL2-2: Exact duplicate of env_revision_1 (same event_id → must be deduped).
-    #        Expect: NOT emitted — dedup via event_id ValueState.
+    #        Expect: NOT emitted — dedup via event_id MapState.
     env_dup = _raw_planning_envelope(
         event_id="plan-evt-rev1",  # same event_id as revision 1
         block_id="BLK-001",

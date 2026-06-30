@@ -9,7 +9,7 @@ functions from inside its KeyedProcessFunction and import-isolates pyflink.
 ADR-20: Block identity = VERSIONING, not dedup-by-key.
   PG PK = (athlete_id, block_id, ingest_time). A repeat block_id for the same
   athlete with a new ingest_time is a NEW revision, kept — never dropped.
-  event_id dedup remains (7d ValueState TTL) for idempotent reprocessing.
+  event_id dedup remains (7d MapState<event_id, bool> TTL) for idempotent reprocessing.
   This module does NOT implement dedup state (pyflink concern, PR-PL2b).
 
 ADR-21: planning UPSERT is effectively an INSERT (no overwrite).
