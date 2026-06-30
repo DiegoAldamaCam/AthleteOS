@@ -37,17 +37,17 @@ def _fake_db_with_rows(rows: list[tuple]) -> MagicMock:
 def _make_client(rows: list[tuple]) -> TestClient:
     """Build a TestClient with the DB dependency overridden to return `rows`.
 
-    Also overrides require_api_key so existing data/shape tests focus on DB
+    Also overrides require_auth so existing data/shape tests focus on DB
     behavior, not auth behavior. Auth-specific tests use _make_auth_client().
     """
     from fastapi import FastAPI
     from api.db import get_db
-    from api.security import require_api_key
+    from api.security import require_auth
 
     app = FastAPI()
     app.include_router(athletes.router)
     app.dependency_overrides[get_db] = lambda: _fake_db_with_rows(rows)
-    app.dependency_overrides[require_api_key] = lambda: None
+    app.dependency_overrides[require_auth] = lambda: None
     return TestClient(app)
 
 
@@ -110,9 +110,8 @@ def test_list_athletes_returns_sorted_athletes():
 
 
 def _make_auth_client() -> TestClient:
-    """Build a TestClient with the REAL require_api_key dep wired (NOT overridden)."""
+    """Build a TestClient with the REAL require_auth dep wired (NOT overridden)."""
     from fastapi import FastAPI
-    from api.security import require_api_key
     from api.db import get_db
 
     app = FastAPI()
