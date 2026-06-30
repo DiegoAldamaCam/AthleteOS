@@ -20,6 +20,7 @@ import os
 # setdefault (not =) means a real CI/dev API_KEY in the environment wins.
 # sc-9 (fail-closed proof) uses monkeypatch.delenv("API_KEY") to override
 # this provisioned value inside that test's scope, proving ValidationError fires.
+os.environ.setdefault("JWT_SECRET", "test-jwt-secret-fixture")
 os.environ.setdefault("API_KEY", "test-api-key-fixture")
 os.environ.setdefault(
     "DATABASE_URL", "postgresql://athleteos:test-password@localhost:5432/athleteos"

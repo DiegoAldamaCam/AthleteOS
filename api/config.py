@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     # the application fails closed rather than starting with no authentication key.
     api_key: str
 
+    # ADR-5 (sdd/athleteos-jwt-auth): jwt_secret REQUIRED, no default — fail-closed.
+    # Absent JWT_SECRET raises ValidationError at import time (sc-17).
+    # Mirrors api_key pattern: application does not start without a configured secret.
+    jwt_secret: str
+    jwt_algorithm: str = "HS256"
+    jwt_expiry_minutes: int = 60
+
     @property
     def cors_origins_list(self) -> list[str]:
         """Return CORS origins as a list (comma-separated string → list)."""
