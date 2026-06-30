@@ -20,7 +20,7 @@ from fastapi import FastAPI, Depends
 from starlette.testclient import TestClient
 
 from api.routers import pipeline
-from api.security import require_api_key
+from api.security import require_auth
 
 
 # ---------------------------------------------------------------------------
@@ -36,17 +36,17 @@ _FAKE_DLQ_RESULT = {
 
 
 def _make_pipeline_client_with_auth() -> TestClient:
-    """TestClient with REAL require_api_key wired on the pipeline router."""
+    """TestClient with REAL require_auth wired on the pipeline router."""
     app = FastAPI()
     app.include_router(pipeline.router)
     return TestClient(app, raise_server_exceptions=False)
 
 
 def _make_pipeline_client_auth_overridden() -> TestClient:
-    """TestClient with require_api_key overridden to always pass (happy-path)."""
+    """TestClient with require_auth overridden to always pass (happy-path)."""
     app = FastAPI()
     app.include_router(pipeline.router)
-    app.dependency_overrides[require_api_key] = lambda: None
+    app.dependency_overrides[require_auth] = lambda: None
     return TestClient(app, raise_server_exceptions=False)
 
 

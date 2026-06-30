@@ -68,8 +68,8 @@ def _fake_db_cursor(rows=None):
 
 
 def _make_metrics_client_with_auth():
-    """TestClient with REAL require_api_key wired on the metrics router."""
-    from api.security import require_api_key
+    """TestClient with REAL require_auth wired on the metrics router."""
+    from api.security import require_auth
     from api.db import get_db
 
     app = FastAPI()
@@ -79,14 +79,14 @@ def _make_metrics_client_with_auth():
 
 
 def _make_metrics_client_auth_overridden():
-    """TestClient with require_api_key overridden (happy-path)."""
-    from api.security import require_api_key
+    """TestClient with require_auth overridden (happy-path)."""
+    from api.security import require_auth
     from api.db import get_db
 
     app = FastAPI()
     app.include_router(metrics.router)
     app.dependency_overrides[get_db] = lambda: _fake_db_cursor()
-    app.dependency_overrides[require_api_key] = lambda: None
+    app.dependency_overrides[require_auth] = lambda: None
     return TestClient(app, raise_server_exceptions=False)
 
 

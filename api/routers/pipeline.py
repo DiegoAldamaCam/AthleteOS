@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends
 from api.config import settings
 from api.kafka_admin import get_dlq_depths
 from api.observability import DLQ_COLLECTOR, update_dlq_gauge
-from api.security import require_api_key
+from api.security import require_auth
 
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
@@ -38,7 +38,7 @@ DLQ_TOPICS = [
 @router.get(
     "/dlq-depth",
     summary="Get unprocessed message count for each DLQ topic",
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(require_auth)],
 )
 def get_dlq_depth() -> dict:
     """Return the current DLQ depth for each tracked topic.

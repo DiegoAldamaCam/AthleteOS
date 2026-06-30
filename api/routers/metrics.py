@@ -25,7 +25,7 @@ from fastapi import status as http_status
 
 from api.db import get_db
 from api.models import MetricRow
-from api.security import require_api_key
+from api.security import require_auth
 
 router = APIRouter()
 
@@ -74,7 +74,7 @@ def _today_utc() -> date:
     "/athletes/{athlete_id}/metrics",
     response_model=list[MetricRow],
     summary="Get athlete training-load metrics for a date range",
-    dependencies=[Depends(require_api_key)],
+    dependencies=[Depends(require_auth)],
 )
 def get_athlete_metrics(
     athlete_id: str,

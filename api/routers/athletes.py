@@ -17,7 +17,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from api.db import get_db
-from api.security import require_api_key
+from api.security import require_auth
 
 router = APIRouter()
 
@@ -32,7 +32,7 @@ _SQL_LIST_ATHLETES = """
 """
 
 
-@router.get("/athletes", summary="List all distinct athlete IDs", dependencies=[Depends(require_api_key)])
+@router.get("/athletes", summary="List all distinct athlete IDs", dependencies=[Depends(require_auth)])
 def list_athletes(db=Depends(get_db)) -> dict:
     """Return sorted distinct athlete IDs known to the system.
 
