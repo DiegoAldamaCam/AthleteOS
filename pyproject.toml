@@ -45,6 +45,12 @@ dependencies = [
   # pydantic-settings backs api/config.py Settings; required at import time at runtime.
   "pydantic-settings>=2.0,<3",
   "sentry-sdk>=2.0,<3",
+  "PyJWT>=2.8,<3",
+  "passlib[bcrypt]>=1.7,<2",
+  # passlib 1.7.x is incompatible with bcrypt>=4 (it reads bcrypt.__about__.__version__,
+  # removed in bcrypt 4.0, and 4.x tightens the 72-byte detection vector). Pin bcrypt to
+  # the 3.2.x line so passlib's bcrypt backend initializes correctly in CI and the image.
+  "bcrypt>=3.2,<4",
 ]
 
 [project.optional-dependencies]
