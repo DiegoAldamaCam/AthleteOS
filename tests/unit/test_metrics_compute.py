@@ -833,3 +833,42 @@ class TestComputeCoachingFlags:
         result = compute_coaching_flags(0, 95.0, None)
         assert result == ["high_fatigue"]
         assert "monitor" not in result, "high_fatigue and monitor must be mutually exclusive"
+
+
+# ---------------------------------------------------------------------------
+# DLQ producer-side size guard (sc-6..sc-7) — RED phase
+# ---------------------------------------------------------------------------
+
+
+class TestMetricsDlqSizeGuard:
+    """sc-6, sc-7: build_metrics_dlq_envelope must apply identical size guard as build_dlq_envelope."""
+
+    def test_metrics_dlq_envelope_oversized_sets_truncation_marker(self):
+        """sc-6: raw value > 524_288 bytes → original_value='', truncated=True, size_bytes=N."""
+        oversized = b"x" * 524_289
+        env = build_metrics_dlq_envelope(
+            original_key="k1",
+            original_value=oversized,
+            error_type=VALIDATION_FAILURE,
+            error_message="test",
+            timestamp=1_000_000,
+        )
+        assert env["original_value"] == ""
+        assert env["original_value_truncated"] is True
+        assert env["original_value_size_bytes"] == 524_289
+
+    def test_metrics_dlq_envelope_normal_fields_present_and_correct(self):
+        """sc-7: normal-size value → truncated=False, correct base64, size_bytes correct."""
+        import base64 as _b64
+        value = b"x" * 100
+        env = build_metrics_dlq_envelope(
+            original_key="k1",
+            original_value=value,
+            error_type=VALIDATION_FAILURE,
+            error_message="test",
+            timestamp=1_000_000,
+        )
+        expected_b64 = _b64.b64encode(value).decode("ascii")
+        assert env["original_value"] == expected_b64
+        assert env["original_value_truncated"] is False
+        assert env["original_value_size_bytes"] == 100

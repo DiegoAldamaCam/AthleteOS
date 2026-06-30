@@ -43,12 +43,24 @@ def _make_envelope(
     original_value: bytes = b'{"event_id":"e1"}',
     error_type: str = "VALIDATION_FAILURE",
     timestamp: int | None = 1719619200000,
+    original_value_truncated: bool = False,
 ) -> bytes:
-    """Build a DLQ envelope as raw bytes (as Kafka consumer would return)."""
+    """Build a DLQ envelope as raw bytes (as Kafka consumer would return).
+
+    The ``original_value_truncated`` kwarg supports sc-10..sc-12: when True the
+    helper emits original_value='' (matching what build_dlq_envelope produces for
+    oversized raw values) and sets the truncated flag so DLQEnvelope.decode
+    populates envelope.original_value_truncated = True.
+    """
+    if original_value_truncated:
+        encoded_value = ""
+    else:
+        encoded_value = base64.b64encode(original_value).decode()
     payload = {
         "original_topic": original_topic,
         "original_key": original_key,
-        "original_value": base64.b64encode(original_value).decode(),
+        "original_value": encoded_value,
+        "original_value_truncated": original_value_truncated,
         "error_type": error_type,
         "error_message": "test error",
         "error_stack": None,
@@ -341,6 +353,115 @@ def test_run_replay_populates_per_topic_replayed():
     )
     assert report.per_topic["dlq.raw.strength"].get("replayed", 0) == 1
     assert report.per_topic["dlq.raw.cardio"].get("replayed", 0) == 1
+
+
+# ---------------------------------------------------------------------------
+# sc-8, sc-9: DLQEnvelope.decode extension — truncated envelope decode
+# ---------------------------------------------------------------------------
+
+def test_decode_truncated_envelope_no_corrupt_envelope_raised():
+    """sc-8: envelope with original_value='' + truncated flag → decode succeeds, original_value==b''.
+
+    An empty-string original_value is valid (base64 of empty → b'').
+    The decoder must NOT raise CorruptEnvelope when all required fields are present.
+    """
+    from tools.dlq_replay.envelope import decode as dlq_decode
+
+    raw = json.dumps({
+        "original_topic": "raw.strength",
+        "original_key": "k1",
+        "original_value": "",               # base64("") == "" → b""
+        "original_value_truncated": True,
+        "original_value_size_bytes": 600_000,
+        "error_type": "VALIDATION_FAILURE",
+        "error_message": "test",
+        "error_stack": None,
+        "timestamp": 1_000_000,
+    }).encode()
+
+    decoded = dlq_decode(raw)
+    assert decoded.original_value == b""
+    # New field must be populated: True when envelope carries truncated=True
+    assert decoded.original_value_truncated is True
+
+
+def test_decode_extra_fields_ignored_truncated_attribute_safe_default():
+    """sc-9 (reconciled per W2): envelope with extra fields → decode succeeds.
+
+    Design decision: original_value_truncated becomes a typed dataclass attribute
+    defaulting False (safer than attribute-absence). Legacy envelopes (no field)
+    decode with truncated=False. Envelopes WITH the field decode with its value.
+    This test asserts the typed-default behaviour on a legacy envelope.
+    """
+    from tools.dlq_replay.envelope import decode as dlq_decode
+
+    # Legacy envelope: original_value_size_bytes present as extra, truncated absent
+    raw = json.dumps({
+        "original_topic": "raw.strength",
+        "original_key": "k1",
+        "original_value": base64.b64encode(b'{"event_id":"e1"}').decode(),
+        "original_value_size_bytes": 17,    # extra field — should be silently ignored
+        "error_type": "VALIDATION_FAILURE",
+        "error_message": "test",
+        "error_stack": None,
+        "timestamp": 1_000_000,
+    }).encode()
+
+    decoded = dlq_decode(raw)
+    # typed attribute present with safe default False (reconciled W2 — not absent)
+    assert decoded.original_value_truncated == False
+
+
+# ---------------------------------------------------------------------------
+# sc-10..sc-12: replay skip for truncated envelopes — RED phase
+# ---------------------------------------------------------------------------
+
+
+def test_replay_truncated_envelope_skips_producer_increments_unrecoverable(caplog):
+    """sc-10: truncated envelope → producer NOT called, skipped_unrecoverable++, TRUNCATED_PRODUCER logged."""
+    cfg = _make_config(dry_run=False)
+    raw = _make_envelope(original_value_truncated=True)
+    consumer = _mock_consumer([raw])
+    producer = _mock_producer()
+
+    with caplog.at_level(logging.WARNING):
+        report = run_replay(cfg, consumer, producer)
+
+    producer.produce.assert_not_called()
+    assert report.skipped_unrecoverable == 1
+    assert report.per_topic["dlq.canonical.training_event"]["skipped_unrecoverable"] == 1
+    assert any("TRUNCATED_PRODUCER" in r.message for r in caplog.records), (
+        "Expected WARNING log containing 'TRUNCATED_PRODUCER'"
+    )
+
+
+def test_replay_truncated_fires_before_size_gate_no_skipped_oversized():
+    """sc-11: truncated envelope → skipped_oversized NOT incremented (truncation check fires first)."""
+    cfg = _make_config(dry_run=False)
+    raw = _make_envelope(original_value_truncated=True)
+    consumer = _mock_consumer([raw])
+    producer = _mock_producer()
+
+    report = run_replay(cfg, consumer, producer)
+
+    assert report.skipped_oversized == 0
+    assert report.skipped_unrecoverable == 1
+
+
+def test_replay_normal_envelope_still_produced():
+    """sc-12: non-truncated envelope within size gate → producer.produce called, skipped_unrecoverable not incremented."""
+    cfg = _make_config(dry_run=False)
+    raw = _make_envelope(
+        original_value=b'{"event_id":"e1"}',
+        original_value_truncated=False,
+    )
+    consumer = _mock_consumer([raw])
+    producer = _mock_producer()
+
+    report = run_replay(cfg, consumer, producer)
+
+    producer.produce.assert_called_once()
+    assert report.skipped_unrecoverable == 0
 
 
 def test_run_replay_per_topic_tracks_unrecoverable():

@@ -462,6 +462,92 @@ def test_transform_strength_negative_rpe_routes_to_validation_failure():
     assert "rpe" in str(exc_info.value).lower()
 
 
+# --- DLQ producer-side size guard (sc-1..sc-5) ----------------------------
+# RED phase: these tests must FAIL before the implementation is added.
+
+
+def test_encode_original_value_oversized_returns_empty_string_and_marker():
+    """sc-1: raw value 524_289 bytes → original_value='', truncated=True, size_bytes=524_289."""
+    oversized = b"x" * 524_289
+    env = T.build_dlq_envelope(
+        original_topic="raw.strength",
+        original_key="k1",
+        original_value=oversized,
+        error_type="VALIDATION_FAILURE",
+        error_message="test",
+        timestamp=1_000_000,
+    )
+    assert env["original_value"] == ""
+    assert env["original_value_truncated"] is True
+    assert env["original_value_size_bytes"] == 524_289
+
+
+def test_encode_original_value_normal_base64_preserved():
+    """sc-2: raw value 100 bytes → base64 correct, truncated=False, size_bytes=100."""
+    import base64 as _b64
+    value = b"x" * 100
+    env = T.build_dlq_envelope(
+        original_topic="raw.strength",
+        original_key="k1",
+        original_value=value,
+        error_type="VALIDATION_FAILURE",
+        error_message="test",
+        timestamp=1_000_000,
+    )
+    expected_b64 = _b64.b64encode(value).decode("ascii")
+    assert env["original_value"] == expected_b64
+    assert env["original_value_truncated"] is False
+    assert env["original_value_size_bytes"] == 100
+
+
+def test_encode_original_value_boundary_exactly_512kib_not_truncated():
+    """sc-3: exactly 524_288 bytes (boundary) → truncated=False, correct base64."""
+    import base64 as _b64
+    value = b"x" * 524_288
+    env = T.build_dlq_envelope(
+        original_topic="raw.strength",
+        original_key="k1",
+        original_value=value,
+        error_type="VALIDATION_FAILURE",
+        error_message="test",
+        timestamp=1_000_000,
+    )
+    assert env["original_value_truncated"] is False
+    assert env["original_value"] == _b64.b64encode(value).decode("ascii")
+    assert env["original_value_size_bytes"] == 524_288
+
+
+def test_encode_original_value_boundary_one_over_truncated():
+    """sc-4: exactly 524_289 bytes (one over boundary) → truncated=True, value=''."""
+    value = b"x" * 524_289
+    env = T.build_dlq_envelope(
+        original_topic="raw.strength",
+        original_key="k1",
+        original_value=value,
+        error_type="VALIDATION_FAILURE",
+        error_message="test",
+        timestamp=1_000_000,
+    )
+    assert env["original_value_truncated"] is True
+    assert env["original_value"] == ""
+    assert env["original_value_size_bytes"] == 524_289
+
+
+def test_encode_original_value_none_encodes_empty_not_truncated():
+    """sc-5: None value → original_value='', truncated=False, size_bytes=0."""
+    env = T.build_dlq_envelope(
+        original_topic="raw.strength",
+        original_key="k1",
+        original_value=None,
+        error_type="VALIDATION_FAILURE",
+        error_message="test",
+        timestamp=1_000_000,
+    )
+    assert env["original_value"] == ""
+    assert env["original_value_truncated"] is False
+    assert env["original_value_size_bytes"] == 0
+
+
 def test_canonical_event_roundtrips_when_rpe_absent():
     raw = _raw_strength_envelope(
         payload={

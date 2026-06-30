@@ -35,6 +35,7 @@ class DLQEnvelope:
     original_value: bytes
     error_type: str | None
     timestamp: int | None
+    original_value_truncated: bool = False  # NEW — additive; default keeps legacy decoders valid
 
 
 # Required fields that MUST be present (even if their value can be null).
@@ -84,4 +85,5 @@ def decode(raw_bytes: bytes) -> DLQEnvelope:
         original_value=original_value,
         error_type=envelope.get("error_type"),
         timestamp=envelope.get("timestamp"),
+        original_value_truncated=bool(envelope.get("original_value_truncated", False)),
     )

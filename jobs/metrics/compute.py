@@ -455,23 +455,38 @@ def metrics_row_to_json(
 
 # --- DLQ error envelope (spec "DLQ Error Envelope") -----------------------
 
+# Maximum raw bytes for original_value before truncation. Own copy per ADR-5:
+# metrics and canonicalize jobs deploy independently; no cross-job import.
+# 512 KiB raw keeps base64-encoded envelope under Kafka/Redpanda 1 MB default.
+MAX_ORIGINAL_VALUE_BYTES = 524_288
+
 
 def epoch_ms_now() -> int:
     """Wall-clock now as epoch-ms long (DLQ envelope timestamp)."""
     return int(time.time() * 1000)
 
 
-def _encode_original_value(value: Any) -> str:
-    """Base64-encode the original_value bytes for the DLQ envelope (spec)."""
+def _encode_original_value(value: Any) -> tuple[str, bool, int]:
+    """Base64-encode original_value bytes, enforcing the 512 KiB size guard.
+
+    Returns:
+        A tuple (encoded_value, truncated, size_bytes) where:
+        - encoded_value: base64 ASCII string, or "" when None or oversized.
+        - truncated: True only when raw byte length exceeds MAX_ORIGINAL_VALUE_BYTES.
+        - size_bytes: raw byte count (0 for None inputs).
+    """
     if value is None:
-        return ""
+        return "", False, 0
     if isinstance(value, (bytes, bytearray)):
         raw_bytes = bytes(value)
     elif isinstance(value, str):
         raw_bytes = value.encode("utf-8")
     else:
         raw_bytes = json.dumps(value).encode("utf-8")
-    return base64.b64encode(raw_bytes).decode("ascii")
+    size = len(raw_bytes)
+    if size > MAX_ORIGINAL_VALUE_BYTES:
+        return "", True, size
+    return base64.b64encode(raw_bytes).decode("ascii"), False, size
 
 
 def build_metrics_dlq_envelope(
@@ -491,10 +506,13 @@ def build_metrics_dlq_envelope(
     may be unparseable. error_type is one of VALIDATION_FAILURE (NaN guard),
     LATE_DATA (event-time window late side output), or DESERIALIZATION_ERROR.
     """
+    encoded, truncated, size_bytes = _encode_original_value(original_value)
     return {
         "original_topic": original_topic,
         "original_key": original_key,
-        "original_value": _encode_original_value(original_value),
+        "original_value": encoded,
+        "original_value_truncated": truncated,
+        "original_value_size_bytes": size_bytes,
         "error_type": error_type,
         "error_message": error_message,
         "error_stack": error_stack,
