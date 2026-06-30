@@ -367,3 +367,37 @@ class TestValidatePlanningBlockMalformedWvt:
         """ValidationError from malformed wvt → VALIDATION_FAILURE (PL2-8)."""
         exc = ValidationError("weekly_volume_targets is not valid JSON")
         assert select_dlq_error_type(exc) == "VALIDATION_FAILURE"
+
+
+# ---------------------------------------------------------------------------
+# sc-5, sc-6, sc-6b  key_by athlete_id guard (DLQ key_by error handling)
+# ---------------------------------------------------------------------------
+
+
+class TestKeyByAthleteIdGuard:
+    """Unit tests for _key_by_athlete_id guard (sc-5, sc-6, sc-6b).
+
+    All scenarios require the function to never raise and to return ""
+    (sentinel) for any non-dict / missing-key / malformed input, and to
+    return the athlete_id string for well-formed payloads.
+    """
+
+    def test_sc5_malformed_json_returns_sentinel(self):
+        """sc-5: malformed JSON string → \"\" (no exception)."""
+        from jobs.planning_canonicalize.transform import _key_by_athlete_id
+        result = _key_by_athlete_id("{bad json")
+        assert result == ""
+
+    def test_sc6_missing_athlete_id_returns_sentinel(self):
+        """sc-6: valid JSON dict without athlete_id → \"\"."""
+        import json
+        from jobs.planning_canonicalize.transform import _key_by_athlete_id
+        result = _key_by_athlete_id(json.dumps({"event_id": "e1"}))
+        assert result == ""
+
+    def test_sc6b_valid_dict_returns_athlete_id(self):
+        """sc-6b: valid JSON dict with athlete_id → the athlete_id value."""
+        import json
+        from jobs.planning_canonicalize.transform import _key_by_athlete_id
+        result = _key_by_athlete_id(json.dumps({"athlete_id": "ath-7", "plan": {}}))
+        assert result == "ath-7"

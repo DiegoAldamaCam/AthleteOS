@@ -227,3 +227,26 @@ def _opt_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise TransformError(f"cannot coerce {value!r} to int") from exc
+
+
+# --- key_by guard functions (DLQ key_by error handling) --------------------
+
+
+def _key_by_event_id(raw: str) -> str:
+    """Extract the ``event_id`` field from a raw JSON string for Flink key_by.
+
+    Returns the string value of ``event_id`` when *raw* is valid JSON, the
+    top-level value is a ``dict``, and ``event_id`` is present and non-falsy.
+    Returns ``""`` (sentinel) for any other input — malformed JSON, non-dict
+    value, missing/falsy key, ``None``, or empty string — so that the record
+    is keyed to the existing ``process_element`` guard which routes it to the
+    DLQ as ``TRANSFORM_ERROR`` (DLQ key_by error handling, ADR-1/ADR-5).
+
+    The function MUST NOT raise for any input value.
+    """
+    import json
+    try:
+        obj = json.loads(raw)
+    except (TypeError, ValueError):
+        return ""
+    return (obj.get("event_id") if isinstance(obj, dict) else None) or ""
