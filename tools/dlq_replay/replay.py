@@ -83,6 +83,23 @@ def run_replay(
         if config.error_type is not None and envelope.error_type != config.error_type:
             continue
 
+        # ADR-3/ADR-4: truncation skip — BEFORE the size gate (sc-11).
+        # Fires when the producer set original_value_truncated=True (oversized raw bytes
+        # dropped at source) or when original_value decoded to b"" (covers legacy
+        # truncated envelopes lacking the flag; also genuine empty-payload envelopes
+        # which are equally unreplayable — both cases are counted as unrecoverable).
+        if envelope.original_value_truncated or envelope.original_value == b"":
+            logger.warning(
+                "TRUNCATED_PRODUCER: skipping producer-truncated DLQ envelope at %s[%d]@%d "
+                "(original_value dropped at source; cannot replay — also covers legitimate "
+                "empty-payload envelopes which are unreplayable)",
+                dlq_topic, dlq_partition, dlq_offset,
+            )
+            report.skipped_unrecoverable += 1
+            topic_counters["skipped_unrecoverable"] += 1
+            processed_count += 1
+            continue
+
         # sc-14, sc-15: oversized gate — size of decoded bytes.
         value_size = len(envelope.original_value)
         if value_size > config.max_size_bytes:

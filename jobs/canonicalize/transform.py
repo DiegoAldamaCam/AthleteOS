@@ -329,15 +329,26 @@ def validate_training_event(event: dict) -> None:
 
 # --- DLQ error envelope ----------------------------------------------------
 
+# Maximum raw bytes for original_value before truncation. 512 KiB raw keeps
+# the base64-encoded envelope under Kafka/Redpanda's default message.max.bytes
+# of 1 MB (base64 4/3 overhead: 512 KiB → ~683 KiB encoded + ~300 B JSON ≈ 700 KB).
+MAX_ORIGINAL_VALUE_BYTES = 524_288
 
-def _encode_original_value(value: Any) -> str:
-    """Base64-encode the original_value bytes for the DLQ envelope.
 
-    Accepts bytes/bytearray (as-is) or str (utf-8 encoded first), matching the
-    spec DLQ envelope: ``original_value`` is base64-encoded-bytes.
+def _encode_original_value(value: Any) -> tuple[str, bool, int]:
+    """Base64-encode original_value bytes, enforcing the 512 KiB size guard.
+
+    Returns:
+        A tuple (encoded_value, truncated, size_bytes) where:
+        - encoded_value: base64 ASCII string, or "" when None or oversized.
+        - truncated: True only when the raw byte length exceeds MAX_ORIGINAL_VALUE_BYTES.
+        - size_bytes: raw byte count (0 for None inputs).
+
+    Accepts bytes/bytearray (as-is), str (utf-8 encoded), or any JSON-serialisable
+    object (json.dumps then utf-8). None is treated as absent → ("", False, 0).
     """
     if value is None:
-        return ""
+        return "", False, 0
     if isinstance(value, (bytes, bytearray)):
         raw_bytes = bytes(value)
     elif isinstance(value, str):
@@ -347,7 +358,10 @@ def _encode_original_value(value: Any) -> str:
         import json
 
         raw_bytes = json.dumps(value).encode("utf-8")
-    return base64.b64encode(raw_bytes).decode("ascii")
+    size = len(raw_bytes)
+    if size > MAX_ORIGINAL_VALUE_BYTES:
+        return "", True, size
+    return base64.b64encode(raw_bytes).decode("ascii"), False, size
 
 
 def build_dlq_envelope(
@@ -366,10 +380,13 @@ def build_dlq_envelope(
     unparseable schema. The DLQ KafkaSink uses DeliveryGuarantee.AT_LEAST_ONCE
     (duplicates are tolerable diagnostics).
     """
+    encoded, truncated, size_bytes = _encode_original_value(original_value)
     return {
         "original_topic": original_topic,
         "original_key": original_key,
-        "original_value": _encode_original_value(original_value),
+        "original_value": encoded,
+        "original_value_truncated": truncated,
+        "original_value_size_bytes": size_bytes,
         "error_type": error_type,
         "error_message": error_message,
         "error_stack": error_stack,
