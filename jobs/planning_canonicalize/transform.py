@@ -248,3 +248,26 @@ def deserialize_planning_block_avro(encoded: bytes, schema: dict) -> dict:
 
     bio = io.BytesIO(encoded)
     return schemaless_reader(bio, schema)
+
+
+# --- key_by guard functions (DLQ key_by error handling) --------------------
+
+
+def _key_by_athlete_id(raw: str) -> str:
+    """Extract the ``athlete_id`` field from a raw JSON string for Flink key_by.
+
+    Returns the string value of ``athlete_id`` when *raw* is valid JSON, the
+    top-level value is a ``dict``, and ``athlete_id`` is present and non-falsy.
+    Returns ``""`` (sentinel) for any other input — malformed JSON, non-dict
+    value, missing/falsy key, ``None``, or empty string — so that the record
+    is keyed to the existing ``process_element`` guard which routes it to the
+    DLQ as ``TRANSFORM_ERROR`` (DLQ key_by error handling, ADR-1/ADR-5).
+
+    The function MUST NOT raise for any input value.
+    """
+    import json
+    try:
+        obj = json.loads(raw)
+    except (TypeError, ValueError):
+        return ""
+    return (obj.get("athlete_id") if isinstance(obj, dict) else None) or ""

@@ -320,3 +320,55 @@ class TestTransactionalIdPrefix:
 
         cardio_prefix = "athleteos-canonicalize-cardio-training-event"
         assert TRANSACTIONAL_ID_PREFIX != cardio_prefix
+
+
+# ---------------------------------------------------------------------------
+# sc-1..sc-4c  key_by event_id guard (DLQ key_by error handling)
+# ---------------------------------------------------------------------------
+
+
+class TestKeyByEventIdGuard:
+    """Unit tests for _key_by_event_id guard (sc-1..sc-4c).
+
+    All scenarios require the function to never raise and to return ""
+    (sentinel) for any non-dict / missing-key / malformed input, and to
+    return the event_id string for well-formed payloads.
+    """
+
+    def test_sc1_malformed_json_returns_sentinel(self):
+        """sc-1: malformed JSON string → \"\" (no exception)."""
+        from jobs.recovery_canonicalize.transform import _key_by_event_id
+        result = _key_by_event_id("not-json")
+        assert result == ""
+
+    def test_sc2_missing_event_id_returns_sentinel(self):
+        """sc-2: valid JSON dict without event_id → \"\"."""
+        import json
+        from jobs.recovery_canonicalize.transform import _key_by_event_id
+        result = _key_by_event_id(json.dumps({"other_field": "abc"}))
+        assert result == ""
+
+    def test_sc3_valid_dict_returns_event_id(self):
+        """sc-3: valid JSON dict with event_id → the event_id value."""
+        import json
+        from jobs.recovery_canonicalize.transform import _key_by_event_id
+        result = _key_by_event_id(json.dumps({"event_id": "evt-123"}))
+        assert result == "evt-123"
+
+    def test_sc4_non_dict_json_returns_sentinel(self):
+        """sc-4: valid JSON non-dict (integer) → \"\" (no AttributeError)."""
+        from jobs.recovery_canonicalize.transform import _key_by_event_id
+        result = _key_by_event_id("42")
+        assert result == ""
+
+    def test_sc4b_empty_string_returns_sentinel(self):
+        """sc-4b: empty string input → \"\"."""
+        from jobs.recovery_canonicalize.transform import _key_by_event_id
+        result = _key_by_event_id("")
+        assert result == ""
+
+    def test_sc4c_none_input_returns_sentinel(self):
+        """sc-4c: None input → \"\" (no TypeError)."""
+        from jobs.recovery_canonicalize.transform import _key_by_event_id
+        result = _key_by_event_id(None)
+        assert result == ""
