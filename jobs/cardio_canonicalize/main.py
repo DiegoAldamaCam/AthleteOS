@@ -196,6 +196,7 @@ def run(config: CardioCanonicalizeJobConfig) -> None:  # pragma: no cover - flin
     )
 
     from jobs.cardio_canonicalize.transform import (
+        _key_by_event_id,
         build_dlq_envelope,
         select_dlq_error_type,
         transform_cardio_to_canonical,
@@ -366,7 +367,7 @@ def run(config: CardioCanonicalizeJobConfig) -> None:  # pragma: no cover - flin
     # --- transform pipeline -------------------------------------------------
     transformed = (
         raw_stream
-        .key_by(lambda raw: json.loads(raw).get("event_id") or "")
+        .key_by(_key_by_event_id)
         .process(
             CardioCanonicalizeProcessFunction(canonical_field_names, schema_version),
             output_type=canonical_row_type,

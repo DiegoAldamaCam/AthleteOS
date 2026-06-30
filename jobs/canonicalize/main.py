@@ -233,6 +233,7 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
     )
 
     from jobs.canonicalize.transform import (
+        _key_by_event_id,
         build_dlq_envelope,
         select_dlq_error_type,
         transform_strength_to_canonical,
@@ -429,7 +430,7 @@ def run(config: CanonicalizeJobConfig) -> None:  # pragma: no cover - flink runt
     # (CRITICAL-1 fix); without it the runtime cannot infer the produced type.
     transformed = (
         raw_stream
-        .key_by(lambda raw: json.loads(raw).get("event_id") or "")
+        .key_by(_key_by_event_id)
         .process(
             CanonicalizeProcessFunction(canonical_field_names, schema_version),
             output_type=canonical_row_type,

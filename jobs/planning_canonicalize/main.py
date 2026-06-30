@@ -183,6 +183,7 @@ def run(config: PlanningCanonicalizeJobConfig) -> None:  # pragma: no cover - fl
     )
 
     from jobs.planning_canonicalize.transform import (
+        _key_by_athlete_id,
         build_dlq_envelope,
         select_dlq_error_type,
         transform_planning_to_canonical,
@@ -383,7 +384,7 @@ def run(config: PlanningCanonicalizeJobConfig) -> None:  # pragma: no cover - fl
     # key is athlete_id so all events for one athlete land in one partition.
     transformed = (
         raw_stream
-        .key_by(lambda raw_str: json.loads(raw_str).get("athlete_id") or "")
+        .key_by(_key_by_athlete_id)
         .process(
             PlanningCanonicalizeProcessFunction(canonical_field_names, schema_version),
             output_type=canonical_row_type,
