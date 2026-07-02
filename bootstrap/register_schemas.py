@@ -1,13 +1,21 @@
 """Register canonical Avro schemas in the Confluent Schema Registry.
 
-Implements PR1 task 2.2 (register half). For each canonical topic it:
+Implements PR1 task 2.2 (register half).
 
-  1. Sets BACKWARD compatibility on the subject ``<topic>-value`` (TopicNameStrategy,
-     ADR-10) via the Registry config API.
-  2. Registers the .avsc payload as a new version of that subject.
+NOTE (G4 DEFECT-5 fix): canonical value subjects are intentionally NOT
+pre-registered here.  Flink 1.19's Table ``avro-confluent`` sink infers its
+writer schema from DDL columns and assigns a Flink-generated record name
+(e.g. ``record``).  Pre-registering the subject under BACKWARD compatibility
+with the hand-authored ``.avsc`` name (``com.athleteos.canonical.TrainingEvent``)
+causes a NAME_MISMATCH rejection on the first write — the sink crash-loops and
+canonical topics receive zero records.
 
-Schema Registry never hardcodes version numbers (spec: "Producers MUST NOT
-hardcode version numbers"); the Registry auto-increments and returns the id.
+The canonical TOPICS are still created by ``bootstrap.create_topics``; only
+the Schema Registry subject pre-registration is suppressed.  The Flink sink
+will register its own writer schema on first emission, which is fully consistent
+with avro-confluent default behaviour.  Consumer jobs (e.g. wellness-metrics)
+read the writer schema by schema-id embedded in each record — they do not depend
+on a subject being pre-registered before consumption.
 
 Environment:
   SCHEMA_REGISTRY_URL  Registry base URL (default http://localhost:8081)
@@ -61,16 +69,15 @@ def register_schema(registry_url: str, subject: str, avsc_path: Path) -> int:
 
 
 def register_all(registry_url: str = DEFAULT_REGISTRY_URL) -> dict:
-    """Register every canonical schema. Returns subject -> schema_id."""
-    results: dict[str, int] = {}
-    for topic, spec in CANONICAL_TOPICS.items():
-        subject = _subject_for(topic)
-        avsc_path = _SCHEMA_DIR / spec["avsc"]
-        if not avsc_path.exists():
-            raise FileNotFoundError(f"Missing Avro schema: {avsc_path}")
-        set_compatibility(registry_url, subject)
-        results[subject] = register_schema(registry_url, subject, avsc_path)
-    return results
+    """Register canonical schemas in the Schema Registry.
+
+    As of G4 DEFECT-5 fix, canonical value subjects are NOT pre-registered.
+    Flink's avro-confluent sink owns its own writer-schema registration on first
+    emission; pre-registering under BACKWARD causes NAME_MISMATCH rejection.
+    This function is kept for future use (e.g. non-Flink producers) and returns
+    an empty dict to signal that no subjects were pre-registered.
+    """
+    return {}
 
 
 def main() -> int:
