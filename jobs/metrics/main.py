@@ -278,7 +278,7 @@ class MetricsJobConfig:
         checkpoint_interval_ms: int = 60_000,
         checkpoint_min_pause_ms: int = 30_000,
         checkpoint_dir: str = "file:///tmp/athleteos-metrics-checkpoints",
-        use_rocksdb: bool = True,
+        use_rocksdb: bool = False,  # DEFECT-#4: HashMap default avoids rocksdbjni SIGSEGV on WSL2
         bounded: bool = False,
         parallelism: int | None = None,
         no_restart: bool = False,
@@ -301,19 +301,21 @@ class MetricsJobConfig:
         self.checkpoint_interval_ms = checkpoint_interval_ms
         self.checkpoint_min_pause_ms = checkpoint_min_pause_ms
         self.checkpoint_dir = checkpoint_dir
-        # EmbeddedRocksDBStateBackend is the production state backend (task 5.1,
-        # design "Keyed state (RocksDB)"). It is gated behind this flag because
-        # the RocksDB native library cannot open its DB under the Flink
-        # minicluster's long TaskManager temp path on Windows
-        # ("Failed to create a NewWriteableFile: ...\\db\\MANIFEST-000001: The
-        # system cannot find the path specified" -- the minicluster auto-
-        # generated tmp dir + operator-id UUID exceed what RocksDB's Windows
-        # file handle can create). The metric math (windowing, ACR, deload,
-        # dedup, late routing) is state-backend independent, so the bounded
-        # integration test runs with the default in-memory (HashMap) backend to
-        # verify correctness; production keeps ``use_rocksdb=True``. Checkpoint
-        # EXACTLY_ONCE / externalized / RETAIN_ON_CANCELLATION / tolerable=3
-        # apply to BOTH backends (task 5.1).
+        # State backend selection (task 5.1, DEFECT-#4 fix):
+        # When False (the default), the cluster's state.backend setting governs
+        # (hashmap in docker-compose.yml) — no programmatic override is applied.
+        # When True, EmbeddedRocksDBStateBackend is set explicitly in run();
+        # opt in via FLINK_STATE_BACKEND=rocksdb for production deployments
+        # where native RocksDB is stable.
+        #
+        # History: default was True (design "Keyed state (RocksDB)"), but was
+        # changed to False after rocksdbjni caused a SIGSEGV in
+        # org.rocksdb.RocksDB.createColumnFamily under Temurin-11/WSL2
+        # (hs_err_pid1.log). The metric math (windowing, ACR, deload, dedup,
+        # late routing) is state-backend independent; correctness is unchanged.
+        # The flag already existed to gate Windows minicluster path issues.
+        # Checkpoint EXACTLY_ONCE / externalized / RETAIN_ON_CANCELLATION /
+        # tolerable=3 apply to BOTH backends (task 5.1).
         self.use_rocksdb = use_rocksdb
         # When True the Table Kafka source is BOUNDED (scan.bounded.mode =
         # latest-offset): reads earliest -> latest-at-startup, then finishes ->
@@ -1340,11 +1342,17 @@ def main() -> int:  # pragma: no cover - entrypoint
     group = os.environ.get("METRICS_GROUP_ID", "metrics-training-event")
     pg_dsn = os.environ.get("METRICS_PG_DSN")  # None => PG sink stays disabled (R1)
     checkpoint_dir = os.environ.get("METRICS_CHECKPOINT_DIR")  # None => use code default (R4)
+    # DEFECT-#4 fix: default to HashMap to avoid rocksdbjni SIGSEGV on WSL2/Temurin-11.
+    # Set FLINK_STATE_BACKEND=rocksdb to opt back into EmbeddedRocksDBStateBackend for
+    # production deployments where native RocksDB is stable. Any other value (including
+    # absent or "hashmap") uses HashMap — fail-safe toward the stable backend.
+    use_rocksdb = os.environ.get("FLINK_STATE_BACKEND", "").lower() == "rocksdb"
     kwargs: dict = {
         "bootstrap_servers": bootstrap,
         "schema_registry_url": registry,
         "group_id": group,
         "pg_dsn": pg_dsn,
+        "use_rocksdb": use_rocksdb,
     }
     if checkpoint_dir:
         kwargs["checkpoint_dir"] = checkpoint_dir

@@ -1,7 +1,10 @@
-"""Unit tests: main() reads METRICS_PG_DSN and METRICS_CHECKPOINT_DIR from env.
+"""Unit tests: main() reads METRICS_PG_DSN, METRICS_CHECKPOINT_DIR, and
+FLINK_STATE_BACKEND from env.
 
 Strict TDD — these tests are written BEFORE the implementation.
-They verify sc-11 (pg_dsn absent → None) and R1/R4 (env reads).
+They verify sc-11 (pg_dsn absent → None), R1/R4 (env reads), and the
+DEFECT-#4 fix: FLINK_STATE_BACKEND env toggle for the HashMap/RocksDB
+state backend selection.
 
 Tests are pure and import-safe: no pyflink required. We stub out `run()`
 so `main()` never reaches the streaming job execution code.
@@ -30,7 +33,8 @@ def _call_main_with_env(monkeypatch, env: dict) -> "MetricsJobConfig":  # type: 
     """
     # Clear env vars that might bleed in from conftest or shell.
     for key in ("METRICS_PG_DSN", "METRICS_CHECKPOINT_DIR", "METRICS_GROUP_ID",
-                "KAFKA_BOOTSTRAP_SERVERS", "SCHEMA_REGISTRY_URL"):
+                "KAFKA_BOOTSTRAP_SERVERS", "SCHEMA_REGISTRY_URL",
+                "FLINK_STATE_BACKEND"):
         monkeypatch.delenv(key, raising=False)
 
     for key, value in env.items():
@@ -85,3 +89,47 @@ class TestCheckpointDirFromEnv:
         config = _call_main_with_env(monkeypatch, {})
         # The code default is file:///tmp/athleteos-metrics-checkpoints (main.py:280).
         assert config.checkpoint_dir == "file:///tmp/athleteos-metrics-checkpoints"
+
+
+# ---------------------------------------------------------------------------
+# DEFECT-#4: FLINK_STATE_BACKEND env toggle (hashmap vs rocksdb)
+#
+# User decision: default to HashMap (avoids RocksDB JNI SIGSEGV on WSL2 /
+# Temurin-11). RocksDB remains available for production via
+# FLINK_STATE_BACKEND=rocksdb.
+# ---------------------------------------------------------------------------
+
+
+class TestStateBackendFromEnv:
+    def test_use_rocksdb_defaults_to_false(self, monkeypatch):
+        """DEFECT-#4: When FLINK_STATE_BACKEND is absent, use_rocksdb defaults to False.
+
+        HashMap backend avoids the rocksdbjni SIGSEGV on WSL2/Temurin-11.
+        The cluster's state.backend: hashmap (compose) then governs, and no
+        programmatic override forces RocksDB.
+        """
+        config = _call_main_with_env(monkeypatch, {})
+        assert config.use_rocksdb is False
+
+    def test_use_rocksdb_true_when_env_set_to_rocksdb(self, monkeypatch):
+        """DEFECT-#4: When FLINK_STATE_BACKEND=rocksdb, use_rocksdb is True.
+
+        Allows production deployments to opt back into the EmbeddedRocksDB
+        state backend by setting the env var explicitly.
+        """
+        config = _call_main_with_env(monkeypatch, {"FLINK_STATE_BACKEND": "rocksdb"})
+        assert config.use_rocksdb is True
+
+    def test_use_rocksdb_false_when_env_set_to_hashmap(self, monkeypatch):
+        """DEFECT-#4 triangulation: Explicit FLINK_STATE_BACKEND=hashmap → use_rocksdb False."""
+        config = _call_main_with_env(monkeypatch, {"FLINK_STATE_BACKEND": "hashmap"})
+        assert config.use_rocksdb is False
+
+    def test_use_rocksdb_false_for_unrecognised_value(self, monkeypatch):
+        """DEFECT-#4 triangulation: Unknown FLINK_STATE_BACKEND value → safe default (False).
+
+        Any value other than 'rocksdb' is treated as HashMap to fail-safe toward
+        the stable backend rather than crashing with RocksDB JNI.
+        """
+        config = _call_main_with_env(monkeypatch, {"FLINK_STATE_BACKEND": "memory"})
+        assert config.use_rocksdb is False
