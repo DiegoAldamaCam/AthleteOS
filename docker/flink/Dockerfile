@@ -55,6 +55,18 @@ COPY schemas/ /opt/flink/usrlib/schemas/
 COPY docker/flink/submit.sh /opt/flink/usrlib/submit.sh
 RUN chmod +x /opt/flink/usrlib/submit.sh
 
+# DEFECT-#3 fix: entrypoint wrapper that chowns /flink-checkpoints at startup
+# before handing off to the real Flink entrypoint via gosu.
+#
+# Background: Docker named volumes initialise as root:root 0755. A RUN chown
+# in the Dockerfile is overwritten by Docker when the volume is first mounted.
+# The wrapper runs as root (compose sets user: root for JM/TM), fixes the
+# ownership, then execs "gosu flink /docker-entrypoint.sh" so all Flink
+# processes run as uid 9999 (flink) — not root. The flink-job-submit service
+# does NOT use this wrapper (no checkpoint writes needed there).
+COPY docker/flink/docker-entrypoint-wrapper.sh /docker-entrypoint-wrapper.sh
+RUN chmod +x /docker-entrypoint-wrapper.sh
+
 # W1 build-time assertion: verify the .avsc path that transform.py:407 will
 # read at runtime. If the COPY layout is wrong, this RUN step fails the build
 # immediately with a clear error — not silently at job submission time.
