@@ -79,7 +79,9 @@ services:
   # 8081 (the alternative `8083:8081` mapping was rejected: it would leave the
   # compose's own port numbers inconsistent across services).
   flink-jobmanager:
-    image: flink:1.19
+    build:
+      context: .
+      dockerfile: docker/flink/Dockerfile
     profiles: ["core"]
     command: jobmanager
     environment:
@@ -92,6 +94,8 @@ services:
     ports:
       - "8082:8082"
       - "9249:9249"
+    volumes:
+      - flink-checkpoints:/flink-checkpoints
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8082/config || exit 1"]
       interval: 10s
@@ -105,7 +109,9 @@ services:
   # control plane is wired). A stronger per-TM registration assertion lives in
   # the metrics/observability stack (post-MVP).
   flink-taskmanager:
-    image: flink:1.19
+    build:
+      context: .
+      dockerfile: docker/flink/Dockerfile
     profiles: ["core"]
     command: taskmanager
     depends_on:
@@ -121,12 +127,53 @@ services:
         metrics.reporter.prom.port: 9250
     ports:
       - "9250:9250"
+    volumes:
+      - flink-checkpoints:/flink-checkpoints
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://flink-jobmanager:8082/config || exit 1"]
       interval: 10s
       timeout: 10s
       retries: 12
       start_period: 30s
+
+  # One-shot job submission service (profile: jobs).
+  #
+  # Waits for the Flink cluster, Kafka, Postgres, and schema-bootstrap to be
+  # ready, then runs submit.sh which submits both streaming jobs to the cluster
+  # via `flink run -pym`. The jobs continue running in the cluster indefinitely;
+  # this container exits 0 after both JobGraphs are accepted.
+  #
+  # Cross-profile note (W4): kafka, postgres, and flink-jobmanager live in the
+  # 'core' profile; schema-bootstrap lives in 'bootstrap'. All cross-profile
+  # depends_on entries carry `required: false` (matching the ingestion service
+  # pattern at lines 186-193) so `--profile jobs` alone renders a valid project.
+  # When launched together with core+bootstrap, the conditions are enforced.
+  flink-job-submit:
+    build:
+      context: .
+      dockerfile: docker/flink/Dockerfile
+    profiles: ["jobs"]
+    depends_on:
+      flink-jobmanager:
+        condition: service_healthy
+        required: false
+      postgres:
+        condition: service_healthy
+        required: false
+      schema-bootstrap:
+        condition: service_completed_successfully
+        required: false
+      kafka:
+        condition: service_healthy
+        required: false
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+      SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      METRICS_PG_DSN: "postgresql://athleteos:${POSTGRES_PASSWORD}@postgres:5432/athleteos"
+      METRICS_CHECKPOINT_DIR: "file:///flink-checkpoints"
+      FLINK_JM: "flink-jobmanager:8082"
+    command: ["/opt/flink/usrlib/submit.sh"]
+    restart: on-failure
 
   postgres:
     image: postgres:16
@@ -273,3 +320,4 @@ services:
 volumes:
   postgres-data:
   grafana-data:
+  flink-checkpoints:
