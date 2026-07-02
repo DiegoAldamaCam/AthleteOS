@@ -28,6 +28,7 @@ Profiles mitigate service-count friction:
 - `core` - kafka, schema-registry, flink-jobmanager, flink-taskmanager, postgres
 - `bootstrap` - one-shot schema registration + topic creation
 - `ingest` - ingestion file watchers (PR2)
+- `jobs` - one-shot Flink job submission (strength canonicalize + metrics)
 - `serve` - FastAPI + React SPA via Nginx (PR6)
 
 ```bash
@@ -43,6 +44,48 @@ compatibility (TopicNameStrategy subjects, `canonical.<event>-value`) and
 creates the 12-topic Kafka topology (6 raw + 3 canonical + 3 DLQ), each with
 exactly 8 partitions and the retention/compaction configs from the
 event-contracts spec.
+
+## Zero-to-data: automated strength pipeline (G4)
+
+The full strength pipeline (raw CSV → canonical Avro → athlete_metrics → API/SPA)
+is now automated end-to-end with a single command sequence:
+
+```bash
+# 1. Start core services + bootstrap topics/schemas + submit Flink jobs + serve API/SPA.
+docker compose --profile core --profile bootstrap --profile jobs --profile serve up -d --build
+
+# The flink-job-submit service (profile: jobs) waits for the Flink cluster,
+# Kafka, Postgres, and schema-bootstrap to be ready, then runs:
+#   flink run -pym jobs.canonicalize.main -pyfs /opt/flink/usrlib
+#   flink run -pym jobs.metrics.main     -pyfs /opt/flink/usrlib
+# Both jobs stream in the cluster; the submit container exits 0.
+
+# 2. Drop sample strength data (ingestion connector picks it up automatically).
+docker compose --profile ingest up -d
+# Sample CSVs are already in data/inbox/*/sample.csv — the watchers pick them up.
+
+# 3. Check Flink jobs are running (both should show RUNNING).
+curl http://localhost:8082/jobs
+
+# 4. Verify athlete_metrics is populated (after ~30–60s of streaming).
+#    Connect to postgres and run:
+#    SELECT COUNT(*) FROM athlete_metrics WHERE athlete_id = '<seed_athlete_id>';
+
+# 5. Access the API and SPA.
+# FastAPI: http://localhost:8000/docs
+# React SPA: http://localhost:80
+```
+
+**Notes on the custom Flink image** (`docker/flink/Dockerfile`):
+- Built FROM `flink:1.19` (Ubuntu Jammy 22.04, Python 3.10 via apt).
+- Installs `apache-flink==1.19.3` PyPI wheel on Python 3.10.
+- Bundles 3 connector JARs committed to `docker/flink/lib/` for offline reproducibility:
+  `flink-connector-kafka-3.3.0-1.19.jar`, `kafka-clients-3.6.0.jar`,
+  `flink-sql-avro-confluent-registry-1.19.1.jar`.
+- Shared by flink-jobmanager, flink-taskmanager, and flink-job-submit
+  (TaskManager must carry Python runtime for PyFlink UDFs).
+- A build-time `RUN ls` assertion verifies the schemas/ COPY layout at build time
+  so a wrong directory layout fails the image build, not silently at job submission.
 
 ## Test harness
 
