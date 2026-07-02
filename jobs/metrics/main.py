@@ -1338,11 +1338,17 @@ def main() -> int:  # pragma: no cover - entrypoint
     bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
     registry = os.environ.get("SCHEMA_REGISTRY_URL", "http://schema-registry:8081")
     group = os.environ.get("METRICS_GROUP_ID", "metrics-training-event")
-    config = MetricsJobConfig(
-        bootstrap_servers=bootstrap,
-        schema_registry_url=registry,
-        group_id=group,
-    )
+    pg_dsn = os.environ.get("METRICS_PG_DSN")  # None => PG sink stays disabled (R1)
+    checkpoint_dir = os.environ.get("METRICS_CHECKPOINT_DIR")  # None => use code default (R4)
+    kwargs: dict = {
+        "bootstrap_servers": bootstrap,
+        "schema_registry_url": registry,
+        "group_id": group,
+        "pg_dsn": pg_dsn,
+    }
+    if checkpoint_dir:
+        kwargs["checkpoint_dir"] = checkpoint_dir
+    config = MetricsJobConfig(**kwargs)
     run(config)
     return 0
 
