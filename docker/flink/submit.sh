@@ -19,12 +19,14 @@ set -euo pipefail
 
 echo "[submit] Submitting jobs.canonicalize.main to ${FLINK_JM}..."
 flink run \
+    -d \
     -m "${FLINK_JM}" \
     -pym jobs.canonicalize.main \
     -pyfs /opt/flink/usrlib
 
 echo "[submit] Submitting jobs.metrics.main to ${FLINK_JM}..."
 flink run \
+    -d \
     -m "${FLINK_JM}" \
     -pym jobs.metrics.main \
     -pyfs /opt/flink/usrlib

@@ -533,7 +533,11 @@ CREATE TABLE canonical_training_event_sink (
   -- Spec: canonical sink MUST be EXACTLY_ONCE (DLQ is AT_LEAST_ONCE).
   -- EXACTLY_ONCE on the kafka connector REQUIRES the transactional-id prefix.
   'sink.delivery-guarantee' = 'exactly-once',
-  'sink.transactional-id-prefix' = 'athleteos-canonicalize-training-event'
+  'sink.transactional-id-prefix' = 'athleteos-canonicalize-training-event',
+  -- Keep producer txn timeout under broker transaction.max.timeout.ms=900000.
+  -- Flink Kafka connector default is 3600000 (1 h) which exceeds the broker
+  -- max and causes InitProducerId rejection -> sink crash-loop.
+  'properties.transaction.timeout.ms' = '600000'
 )
 """
     tbl_env.execute_sql(sink_ddl)
