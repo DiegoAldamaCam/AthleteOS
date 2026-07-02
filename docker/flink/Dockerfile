@@ -28,7 +28,13 @@ RUN apt-get update \
         python3 \
         python3-pip \
         python3-dev \
+        python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
+
+# W2 build-time assertion: verify that `python` resolves (Flink's PythonDriver
+# shells out to `python` on `flink run -pym`; without this the submit crashes
+# with "Cannot run program python: error=2" at runtime — not at build time).
+RUN python --version
 
 # Install the apache-flink PyPI wheel (must match the Flink cluster version).
 RUN pip3 install --no-cache-dir apache-flink==1.19.3
