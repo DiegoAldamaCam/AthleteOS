@@ -37,7 +37,15 @@ RUN apt-get update \
 RUN python --version
 
 # Install the apache-flink PyPI wheel (must match the Flink cluster version).
-RUN pip3 install --no-cache-dir apache-flink==1.19.3
+# psycopg2-binary: required by the metrics PG UPSERT sink (jobs/metrics/main.py:981).
+# Binary wheel avoids needing libpq-dev + build toolchain; version pinned to match
+# pyproject.toml (psycopg2-binary>=2.9,<3) — cp310 wheels available for both bounds.
+RUN pip3 install --no-cache-dir apache-flink==1.19.3 "psycopg2-binary>=2.9,<3"
+
+# Build-time assertion: fail the build if psycopg2 is missing or broken so the
+# error surfaces here instead of crashing the metrics PG sink at the first window
+# fire at runtime (mirrors the W2 `RUN python --version` gate above).
+RUN python3 -c "import psycopg2"
 
 # Copy connector JARs into $FLINK_HOME/lib so the cluster JVM classpath picks
 # them up automatically on startup (not pyflink/lib — that path is for the
