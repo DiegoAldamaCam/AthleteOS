@@ -19,14 +19,21 @@ import pytest
 import requests
 
 from bootstrap._topology import CANONICAL_TOPICS
-from bootstrap.register_schemas import register_all, set_compatibility
+from bootstrap.register_schemas import _SCHEMA_DIR, register_all, register_schema, set_compatibility
 
 pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
 def registry(redpanda_endpoints) -> dict:
-    """Register all schemas against the Redpanda-backed registry, return urls.
+    """Seed canonical schemas directly into the Redpanda-backed registry.
+
+    As of the G4 DEFECT-5 fix, ``register_all()`` is a NOOP — the Flink
+    avro-confluent sink owns its own writer-schema registration on first
+    emission.  This fixture simulates what the sink does on first emission by
+    POSTing each canonical v1 ``.avsc`` schema to the Schema Registry REST API
+    directly and setting BACKWARD compatibility per subject.  The existing
+    BACKWARD-enforcement assertions (tests 3 & 4) are preserved without change.
 
     Yields the url dict and tears down all registered subjects after each test
     so that a session-scoped Redpanda container does not bleed schema state
@@ -35,7 +42,16 @@ def registry(redpanda_endpoints) -> dict:
     import time
 
     url = redpanda_endpoints["schema_registry_url"]
-    register_all(url)
+
+    # Seed v1 schemas directly (simulates Flink sink's first-emission registration).
+    # register_all() is kept in the import for completeness but is intentionally
+    # not called here — it returns {} and does nothing (DEFECT-5 fix).
+    for topic, cfg in CANONICAL_TOPICS.items():
+        subject = f"{topic}-value"
+        avsc_path = _SCHEMA_DIR / cfg["avsc"]
+        register_schema(url, subject, avsc_path)
+        set_compatibility(url, subject, "BACKWARD")
+
     yield {"url": url}
 
     # Teardown: delete every subject registered during this test so subsequent
