@@ -106,3 +106,54 @@ class TestCanonicalizeJobConfigRejectsInjection:
     def test_double_quote_in_canonical_topic_rejected(self):
         with pytest.raises(ValueError, match="canonical_topic"):
             _make(canonical_topic='canonical.training_event"injected')
+
+
+# ---------------------------------------------------------------------------
+# Regression guard: exactly-once Kafka sink transaction timeout (G4 DEFECT-2)
+# ---------------------------------------------------------------------------
+
+
+class TestSinkTransactionTimeout:
+    """Lock the producer transaction timeout on the EXACTLY_ONCE canonical sink.
+
+    The Flink Kafka connector default is 3_600_000 ms (1 h), which exceeds the
+    broker's transaction.max.timeout.ms=900_000 and causes an InitProducerId
+    rejection -> sink crash-loop (G4 DEFECT-2, commit cd1f6e5). This guards
+    against anyone removing or raising the override past the broker maximum.
+
+    Source-level assertion (not execution): the DDL is an inline f-string inside
+    a pyflink-dependent function, so we assert on the module source rather than
+    standing up a TableEnvironment.
+    """
+
+    _BROKER_MAX_TXN_TIMEOUT_MS = 900_000
+
+    def _sink_ddl_source(self) -> str:
+        import inspect
+
+        import jobs.canonicalize.main as canon
+
+        return inspect.getsource(canon)
+
+    def test_transaction_timeout_property_present(self):
+        src = self._sink_ddl_source()
+        assert "'properties.transaction.timeout.ms'" in src, (
+            "canonical sink DDL is missing the transaction.timeout.ms override — "
+            "the connector default (3_600_000) exceeds the broker max and will "
+            "crash-loop the sink (G4 DEFECT-2)"
+        )
+
+    def test_transaction_timeout_under_broker_max(self):
+        import re
+
+        src = self._sink_ddl_source()
+        match = re.search(
+            r"'properties\.transaction\.timeout\.ms'\s*=\s*'(\d+)'", src
+        )
+        assert match is not None, "could not find the transaction.timeout.ms value in the DDL"
+        timeout_ms = int(match.group(1))
+        assert timeout_ms < self._BROKER_MAX_TXN_TIMEOUT_MS, (
+            f"transaction.timeout.ms={timeout_ms} must stay below the broker "
+            f"transaction.max.timeout.ms={self._BROKER_MAX_TXN_TIMEOUT_MS} "
+            "(InitProducerId rejection / sink crash-loop otherwise)"
+        )

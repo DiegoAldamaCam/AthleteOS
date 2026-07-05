@@ -28,6 +28,7 @@ Profiles mitigate service-count friction:
 - `core` - kafka, schema-registry, flink-jobmanager, flink-taskmanager, postgres
 - `bootstrap` - one-shot schema registration + topic creation
 - `ingest` - ingestion file watchers (PR2)
+- `jobs` - one-shot Flink job submission (strength canonicalize + metrics)
 - `serve` - FastAPI + React SPA via Nginx (PR6)
 
 ```bash
@@ -43,6 +44,57 @@ compatibility (TopicNameStrategy subjects, `canonical.<event>-value`) and
 creates the 12-topic Kafka topology (6 raw + 3 canonical + 3 DLQ), each with
 exactly 8 partitions and the retention/compaction configs from the
 event-contracts spec.
+
+## Zero-to-data: automated strength pipeline (G4)
+
+The full strength pipeline (raw CSV → canonical Avro → athlete_metrics → API/SPA)
+is now automated end-to-end with a single command sequence:
+
+```bash
+# 1. Start core services + bootstrap topics/schemas + submit Flink jobs + serve API/SPA.
+docker compose --profile core --profile bootstrap --profile jobs --profile serve up -d --build
+
+# The flink-job-submit service (profile: jobs) waits for the Flink cluster,
+# Kafka, Postgres, and schema-bootstrap to be ready, then runs:
+#   flink run -pym jobs.canonicalize.main -pyfs /opt/flink/usrlib
+#   flink run -pym jobs.metrics.main     -pyfs /opt/flink/usrlib
+# Both jobs stream in the cluster; the submit container exits 0.
+
+# 2. Drop sample strength data (ingestion connector picks it up automatically).
+docker compose --profile ingest up -d
+# Sample CSVs are already in data/inbox/*/sample.csv — the watchers pick them up.
+
+# 3. Check Flink jobs are running (both should show RUNNING).
+curl http://localhost:8082/jobs
+
+# 4. Verify athlete_metrics is populated.
+#    Connect to postgres and run:
+#    SELECT COUNT(*) FROM athlete_metrics WHERE athlete_id = '<seed_athlete_id>';
+#
+#    NOTE — event-time windows, not wall-clock: the metrics job aggregates on a
+#    daily TumblingEventTimeWindow with 24h allowed lateness. A window for day D
+#    only closes (and writes rows) once the watermark passes D + 48h, and the
+#    watermark is (max event timestamp − 24h out-of-orderness). This is why the
+#    shipped data/inbox/strength/sample.csv spans MULTIPLE consecutive days
+#    (2026-06-20 .. 2026-06-30): a single-day CSV never advances the watermark
+#    far enough to fire any window, so athlete_metrics would stay empty. If you
+#    supply your own data, make sure it spans at least ~3 event-time days.
+
+# 5. Access the API and SPA.
+# FastAPI: http://localhost:8000/docs
+# React SPA: http://localhost:80
+```
+
+**Notes on the custom Flink image** (`docker/flink/Dockerfile`):
+- Built FROM `flink:1.19` (Ubuntu Jammy 22.04, Python 3.10 via apt).
+- Installs `apache-flink==1.19.3` PyPI wheel on Python 3.10.
+- Bundles 3 connector JARs committed to `docker/flink/lib/` for offline reproducibility:
+  `flink-connector-kafka-3.3.0-1.19.jar`, `kafka-clients-3.6.0.jar`,
+  `flink-sql-avro-confluent-registry-1.19.1.jar`.
+- Shared by flink-jobmanager, flink-taskmanager, and flink-job-submit
+  (TaskManager must carry Python runtime for PyFlink UDFs).
+- A build-time `RUN ls` assertion verifies the schemas/ COPY layout at build time
+  so a wrong directory layout fails the image build, not silently at job submission.
 
 ## Test harness
 
@@ -107,20 +159,24 @@ docker compose --profile ingest up -d
 # Add more files to data/inbox/<connector>/ at any time.
 ```
 
-### 6. ⚠️ Submit Flink jobs (manual step — G4, not yet automated)
+### 6. Submit the strength Flink jobs (automated via the `jobs` profile)
 
-The raw-to-canonical and canonical-to-metrics Flink jobs must be submitted manually.
-Until they run, the `athlete_metrics` and `planning_blocks` tables will be empty
-and the UI will show no metric data.
+The raw-to-canonical and canonical-to-metrics jobs are submitted automatically by
+the one-shot `flink-job-submit` service. It waits for the Flink cluster, Kafka,
+Postgres, and schema-bootstrap to be ready, then runs both jobs detached:
 
 ```bash
-# Submit jobs via the Flink REST API or Flink dashboard at http://localhost:8082
-# Example (adjust JAR path for your setup):
-docker exec flink-jobmanager flink run -py /opt/flink/jobs/strength_canonicalize.py
-# Repeat for each job: wellness, cardio, recovery, nutrition, planning, metrics
+docker compose --profile core --profile jobs up -d
+# The flink-job-submit container runs:
+#   flink run -d -pym jobs.canonicalize.main -pyfs /opt/flink/usrlib
+#   flink run -d -pym jobs.metrics.main     -pyfs /opt/flink/usrlib
+# then exits 0. Confirm both jobs are RUNNING:
+curl http://localhost:8082/jobs
 ```
 
-> **Tracking**: Flink job submission automation is tracked separately as G4.
+Until these jobs run, the `athlete_metrics` table stays empty. Note that metrics
+use daily event-time windows: see the "Zero-to-data" section above for why the
+sample data must span multiple event-time days for windows to fire.
 
 ### 7. Start the API and React SPA
 
@@ -138,8 +194,8 @@ docker compose --profile serve up -d
 | Postgres tables | ✅ created automatically on first postgres start |
 | Login user | ✅ seeded via tools/seed_user.py |
 | CSV ingestion → raw Kafka topics | ✅ sample.csv files trigger the watchers |
-| Flink canonicalize + metrics jobs | ⚠️ **manual** — G4 not yet wired |
-| athlete_metrics populated | ⚠️ requires Flink jobs to run first |
+| Flink canonicalize + metrics jobs | ✅ automated via the `jobs` profile (G4) |
+| athlete_metrics populated | ✅ after jobs run + multi-day event-time data |
 | React SPA + FastAPI | ✅ serve profile |
 
 ## SDD context
