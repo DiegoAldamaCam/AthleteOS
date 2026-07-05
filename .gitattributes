@@ -1,0 +1,13 @@
+# Normalize line endings so Windows checkouts don't break Linux containers.
+# Shell scripts MUST be LF — a CRLF shebang (`#!/usr/bin/env bash\r`) makes the
+# kernel look for an interpreter named `bash\r` and the container exits 127.
+*.sh text eol=lf
+
+# Other files that run inside Linux containers / must stay LF.
+Dockerfile text eol=lf
+*.dockerfile text eol=lf
+docker-entrypoint*.sh text eol=lf
+
+# Vendored binaries — never touch.
+*.jar binary
+*.avsc text eol=lf
