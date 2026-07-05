@@ -139,6 +139,16 @@ services:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      # Auto-apply DDL on first init of a fresh postgres-data volume.
+      # postgres:16 executes *.sql files in /docker-entrypoint-initdb.d/ in
+      # alphabetical order when the data directory is empty (first-run only).
+      # Numeric prefixes guarantee deterministic execution order.
+      # IMPORTANT: these scripts do NOT re-run on an existing volume.
+      # To force a re-run: `docker compose down -v` (destroys all data) or
+      # apply manually: `docker exec -i <container> psql -U athleteos -d athleteos < storage/postgres/ddl.sql`
+      - ./storage/postgres/users_ddl.sql:/docker-entrypoint-initdb.d/01-users.sql:ro
+      - ./storage/postgres/ddl.sql:/docker-entrypoint-initdb.d/02-athlete-metrics.sql:ro
+      - ./storage/postgres/planning_ddl.sql:/docker-entrypoint-initdb.d/03-planning-blocks.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U athleteos -d athleteos"]
       interval: 10s

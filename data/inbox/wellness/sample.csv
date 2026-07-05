@@ -1,0 +1,4 @@
+athlete_id,date,hrv,sleep_hours,resting_hr,steps,body_weight_kg,energy,soreness,mood,stress,perceived_recovery
+athlete-1,2026-06-30,68.5,7.5,52,9200,78.2,7,3,8,4,7
+athlete-2,2026-06-30,72.0,8.0,48,11500,83.0,8,2,9,3,8
+athlete-1,2026-07-01,65.0,6.5,55,8700,78.0,6,4,7,5,6

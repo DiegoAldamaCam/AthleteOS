@@ -1,0 +1,4 @@
+athlete_id,activity_type,duration_sec,timestamp,distance_km,avg_hr,tss
+athlete-1,run,3600,2026-06-30T07:00:00,10.5,155,85.0
+athlete-2,cycling,5400,2026-06-30T06:30:00,45.0,148,120.0
+athlete-1,run,2700,2026-07-01T07:00:00,7.2,160,65.0

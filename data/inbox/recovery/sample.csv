@@ -1,0 +1,4 @@
+athlete_id,date,sleep_hours,resting_hr,hrv,steps,body_weight_kg
+athlete-1,2026-06-30,7.5,52,68.5,9200,78.2
+athlete-2,2026-06-30,8.0,48,72.0,11500,83.0
+athlete-1,2026-07-01,6.5,55,65.0,8700,78.0

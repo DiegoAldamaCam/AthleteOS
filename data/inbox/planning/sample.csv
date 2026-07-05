@@ -1,0 +1,3 @@
+athlete_id,block_id,goal,start_date,end_date,planned_sessions_per_week,weekly_volume_targets
+athlete-1,block-2026-q3-strength,Increase max strength,2026-07-01,2026-09-30,4,"{""strength_kg"": 500, ""cardio_min"": 90}"
+athlete-2,block-2026-q3-endurance,Build aerobic base,2026-07-01,2026-09-30,5,"{""strength_kg"": 200, ""cardio_min"": 300}"
