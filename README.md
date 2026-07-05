@@ -67,9 +67,18 @@ docker compose --profile ingest up -d
 # 3. Check Flink jobs are running (both should show RUNNING).
 curl http://localhost:8082/jobs
 
-# 4. Verify athlete_metrics is populated (after ~30–60s of streaming).
+# 4. Verify athlete_metrics is populated.
 #    Connect to postgres and run:
 #    SELECT COUNT(*) FROM athlete_metrics WHERE athlete_id = '<seed_athlete_id>';
+#
+#    NOTE — event-time windows, not wall-clock: the metrics job aggregates on a
+#    daily TumblingEventTimeWindow with 24h allowed lateness. A window for day D
+#    only closes (and writes rows) once the watermark passes D + 48h, and the
+#    watermark is (max event timestamp − 24h out-of-orderness). This is why the
+#    shipped data/inbox/strength/sample.csv spans MULTIPLE consecutive days
+#    (2026-06-20 .. 2026-06-30): a single-day CSV never advances the watermark
+#    far enough to fire any window, so athlete_metrics would stay empty. If you
+#    supply your own data, make sure it spans at least ~3 event-time days.
 
 # 5. Access the API and SPA.
 # FastAPI: http://localhost:8000/docs
