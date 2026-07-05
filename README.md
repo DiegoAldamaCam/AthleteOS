@@ -159,20 +159,24 @@ docker compose --profile ingest up -d
 # Add more files to data/inbox/<connector>/ at any time.
 ```
 
-### 6. ⚠️ Submit Flink jobs (manual step — G4, not yet automated)
+### 6. Submit the strength Flink jobs (automated via the `jobs` profile)
 
-The raw-to-canonical and canonical-to-metrics Flink jobs must be submitted manually.
-Until they run, the `athlete_metrics` and `planning_blocks` tables will be empty
-and the UI will show no metric data.
+The raw-to-canonical and canonical-to-metrics jobs are submitted automatically by
+the one-shot `flink-job-submit` service. It waits for the Flink cluster, Kafka,
+Postgres, and schema-bootstrap to be ready, then runs both jobs detached:
 
 ```bash
-# Submit jobs via the Flink REST API or Flink dashboard at http://localhost:8082
-# Example (adjust JAR path for your setup):
-docker exec flink-jobmanager flink run -py /opt/flink/jobs/strength_canonicalize.py
-# Repeat for each job: wellness, cardio, recovery, nutrition, planning, metrics
+docker compose --profile core --profile jobs up -d
+# The flink-job-submit container runs:
+#   flink run -d -pym jobs.canonicalize.main -pyfs /opt/flink/usrlib
+#   flink run -d -pym jobs.metrics.main     -pyfs /opt/flink/usrlib
+# then exits 0. Confirm both jobs are RUNNING:
+curl http://localhost:8082/jobs
 ```
 
-> **Tracking**: Flink job submission automation is tracked separately as G4.
+Until these jobs run, the `athlete_metrics` table stays empty. Note that metrics
+use daily event-time windows: see the "Zero-to-data" section above for why the
+sample data must span multiple event-time days for windows to fire.
 
 ### 7. Start the API and React SPA
 
@@ -190,8 +194,8 @@ docker compose --profile serve up -d
 | Postgres tables | ✅ created automatically on first postgres start |
 | Login user | ✅ seeded via tools/seed_user.py |
 | CSV ingestion → raw Kafka topics | ✅ sample.csv files trigger the watchers |
-| Flink canonicalize + metrics jobs | ⚠️ **manual** — G4 not yet wired |
-| athlete_metrics populated | ⚠️ requires Flink jobs to run first |
+| Flink canonicalize + metrics jobs | ✅ automated via the `jobs` profile (G4) |
+| athlete_metrics populated | ✅ after jobs run + multi-day event-time data |
 | React SPA + FastAPI | ✅ serve profile |
 
 ## SDD context

@@ -84,8 +84,14 @@ def main() -> int:
     import os
 
     registry_url = os.environ.get("SCHEMA_REGISTRY_URL", DEFAULT_REGISTRY_URL)
-    register_all(registry_url)
-    print(f"[schema] done: registered {len(CANONICAL_TOPICS)} schemas against {registry_url}")
+    registered = register_all(registry_url)
+    print(f"[schema] done: pre-registered {len(registered)} subject(s) against {registry_url}")
+    if not registered:
+        print(
+            "[schema] note: no canonical value subjects pre-registered "
+            "(G4 DEFECT-5); the Flink avro-confluent sink registers its own "
+            "writer schema on first emission."
+        )
     return 0
 
 

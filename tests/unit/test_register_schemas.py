@@ -22,7 +22,7 @@ class TestCanonicalSubjectsNotPreRegistered:
     """register_all() must NOT call set_compatibility or register_schema
     for any canonical value subject (NAME_MISMATCH prevention, DEFECT-5)."""
 
-    def test_set_compatibility_not_called_for_canonical_training_event(self, tmp_path):
+    def test_set_compatibility_not_called_for_canonical_training_event(self):
         """set_compatibility must NOT be called for canonical.training_event-value."""
         with patch("bootstrap.register_schemas.set_compatibility") as mock_compat, \
              patch("bootstrap.register_schemas.register_schema") as mock_reg:
@@ -35,7 +35,7 @@ class TestCanonicalSubjectsNotPreRegistered:
             "Flink sink will get NAME_MISMATCH on first write (DEFECT-5)"
         )
 
-    def test_register_schema_not_called_for_canonical_training_event(self, tmp_path):
+    def test_register_schema_not_called_for_canonical_training_event(self):
         """register_schema must NOT be called for canonical.training_event-value."""
         with patch("bootstrap.register_schemas.set_compatibility"), \
              patch("bootstrap.register_schemas.register_schema") as mock_reg:
@@ -106,3 +106,25 @@ class TestSubjectHelperAndTopology:
         assert "canonical.training_event" in CANONICAL_TOPICS
         assert "canonical.wellness_event" in CANONICAL_TOPICS
         assert "canonical.planning_block" in CANONICAL_TOPICS
+
+
+class TestMainLogsHonestSubjectCount:
+    """main() must report the ACTUAL number of pre-registered subjects, not
+    len(CANONICAL_TOPICS). After DEFECT-5 the real count is 0; logging 3 would
+    be a misleading ops signal (R3 review finding)."""
+
+    def test_main_reports_zero_subjects_not_topic_count(self, capsys):
+        from bootstrap.register_schemas import main
+
+        with patch("bootstrap.register_schemas.set_compatibility"), \
+             patch("bootstrap.register_schemas.register_schema"):
+            rc = main()
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        # Must NOT claim it registered 3 (len(CANONICAL_TOPICS)) subjects.
+        assert "registered 3" not in out, (
+            "main() logged a subject count of 3 while register_all() pre-registers 0 "
+            "(misleading bootstrap log)"
+        )
+        assert "pre-registered 0 subject(s)" in out
