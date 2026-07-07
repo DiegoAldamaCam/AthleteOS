@@ -277,7 +277,11 @@ services:
     environment:
       DATABASE_URL: "postgresql://athleteos:${POSTGRES_PASSWORD}@postgres:5432/athleteos"
       KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
-      CORS_ORIGINS: "http://localhost:5173"
+      # http://localhost   -> the nginx-served SPA (web service, host port 80)
+      # http://localhost:5173 -> the Vite dev server
+      # Both are valid browser origins for the SPA, so both must be allowed or
+      # the browser blocks the API calls with a CORS 400 (front "doesn't work").
+      CORS_ORIGINS: "http://localhost,http://localhost:5173"
       API_KEY: ${API_KEY}
       JWT_SECRET: ${JWT_SECRET}
     ports:

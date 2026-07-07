@@ -2,9 +2,12 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install only the API runtime deps (not heavy streaming deps)
+# API runtime deps. confluent-kafka is REQUIRED: the /health readiness probe and
+# the /pipeline/dlq-depth endpoint use AdminClient.list_topics to reach the broker.
+# Without it the app runs but reports the broker as permanently unreachable.
+# Version pinned to match ingestion/ and bootstrap/ Dockerfiles (>=2.5,<3).
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir "fastapi>=0.110" "uvicorn[standard]>=0.29" "psycopg2-binary>=2.9,<3" "pydantic>=2.0" "pydantic-settings>=2.0" "prometheus_client>=0.20,<1" "PyJWT>=2.8,<3" "passlib[bcrypt]>=1.7,<2" "bcrypt>=3.2,<4"
+RUN pip install --no-cache-dir "fastapi>=0.110" "uvicorn[standard]>=0.29" "psycopg2-binary>=2.9,<3" "pydantic>=2.0" "pydantic-settings>=2.0" "prometheus_client>=0.20,<1" "PyJWT>=2.8,<3" "passlib[bcrypt]>=1.7,<2" "bcrypt>=3.2,<4" "confluent-kafka>=2.5,<3"
 
 COPY api/ ./api/
 

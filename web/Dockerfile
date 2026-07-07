@@ -1,8 +1,11 @@
 # Stage 1: build
-FROM node:20-alpine AS builder
+# Node 22: pnpm 10+ uses node:sqlite and requires Node >= 22.13. node:20 breaks
+# the build with "No such built-in module: node:sqlite".
+FROM node:22-alpine AS builder
 
-# Install pnpm
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Install pnpm. Pin a specific major instead of @latest so a future pnpm release
+# cannot silently break this build again by bumping its Node floor.
+RUN corepack enable && corepack prepare pnpm@10.12.1 --activate
 
 WORKDIR /app
 
