@@ -25,6 +25,27 @@ export interface AthletesResponse {
   athletes: string[]
 }
 
+// Directory: per-athlete metadata (name + sport). name/sport can be null for
+// athletes present only in athlete_metrics (e.g. the pipeline-seeded athletes).
+export interface AthleteDirectoryEntry {
+  athlete_id: string
+  name: string | null
+  sport: string | null
+}
+
+export interface AthleteDirectoryResponse {
+  athletes: AthleteDirectoryEntry[]
+}
+
+export interface SportCount {
+  sport: string
+  athlete_count: number
+}
+
+export interface SportsResponse {
+  sports: SportCount[]
+}
+
 export type DlqStatus = 'ok' | 'warning' | 'unavailable'
 
 export interface DlqTopic {

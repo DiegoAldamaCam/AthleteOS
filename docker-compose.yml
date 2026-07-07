@@ -213,6 +213,7 @@ services:
       - ./storage/postgres/users_ddl.sql:/docker-entrypoint-initdb.d/01-users.sql:ro
       - ./storage/postgres/ddl.sql:/docker-entrypoint-initdb.d/02-athlete-metrics.sql:ro
       - ./storage/postgres/planning_ddl.sql:/docker-entrypoint-initdb.d/03-planning-blocks.sql:ro
+      - ./storage/postgres/athletes_ddl.sql:/docker-entrypoint-initdb.d/04-athletes.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U athleteos -d athleteos"]
       interval: 10s

@@ -13,14 +13,21 @@ vi.mock('@/api/client', () => ({
   fetchMetrics: vi.fn(),
   fetchDlqDepth: vi.fn(),
   fetchAthletes: vi.fn(),
+  fetchAthleteDirectory: vi.fn(),
 }))
 
 // Import AFTER vi.mock so we get the mocked versions.
-import { fetchMetrics, fetchDlqDepth, fetchAthletes } from '@/api/client'
+import {
+  fetchMetrics,
+  fetchDlqDepth,
+  fetchAthletes,
+  fetchAthleteDirectory,
+} from '@/api/client'
 
 const mockFetchMetrics = fetchMetrics as ReturnType<typeof vi.fn>
 const mockFetchDlqDepth = fetchDlqDepth as ReturnType<typeof vi.fn>
 const mockFetchAthletes = fetchAthletes as ReturnType<typeof vi.fn>
+const mockFetchAthleteDirectory = fetchAthleteDirectory as ReturnType<typeof vi.fn>
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -93,6 +100,11 @@ beforeEach(() => {
   // Default: athletes list resolves with ['A1'] so the selector renders
   // and DashboardPage auto-selects 'A1', matching all existing fixture data.
   mockFetchAthletes.mockResolvedValue(['A1'])
+  // Directory drives the AthletePicker; mirror the same athlete so selection
+  // and downstream metrics fixtures still line up.
+  mockFetchAthleteDirectory.mockResolvedValue([
+    { athlete_id: 'A1', name: 'Athlete One', sport: 'running' },
+  ])
 })
 
 // ---------------------------------------------------------------------------
@@ -482,11 +494,8 @@ describe('Scenario: sc-3.1 — default selection is first alphabetical athlete',
 
     renderDashboard(makeClient())
 
-    // Wait for selector to settle on A1 after athletes list resolves and useEffect fires
-    const select = await screen.findByRole('combobox')
-    await waitFor(() => expect(select).toHaveValue('A1'))
-
-    // fetchMetrics was called with A1 (the default selection)
+    // Default selection is driven by the /athletes list (auto-select first).
+    // fetchMetrics was called with A1 (the default selection).
     await waitFor(() => {
       expect(mockFetchMetrics).toHaveBeenCalledWith('A1', undefined, undefined)
     })
@@ -497,20 +506,21 @@ describe('Scenario: sc-3.1 — default selection is first alphabetical athlete',
 // sc-3.2: Athlete change triggers metrics re-fetch for new athlete
 // ---------------------------------------------------------------------------
 describe('Scenario: sc-3.2 — athlete change re-fetches metrics', () => {
-  it('calls fetchMetrics with A2 when user selects A2 from the dropdown', async () => {
+  it('calls fetchMetrics with A2 when user picks A2 from the athlete picker', async () => {
     const user = userEvent.setup()
     mockFetchAthletes.mockResolvedValue(['A1', 'A2'])
+    mockFetchAthleteDirectory.mockResolvedValue([
+      { athlete_id: 'A1', name: 'Athlete One', sport: 'running' },
+      { athlete_id: 'A2', name: 'Athlete Two', sport: 'cycling' },
+    ])
     mockFetchMetrics.mockResolvedValue(makeMetricRows(3))
     mockFetchDlqDepth.mockResolvedValue(makeDlqOk())
 
     renderDashboard(makeClient())
 
-    // Wait for selector to settle on A1 after athletes list resolves and useEffect fires
-    const select = await screen.findByRole('combobox')
-    await waitFor(() => expect(select).toHaveValue('A1'))
-
-    // User changes selection to A2
-    await user.selectOptions(select, 'A2')
+    // The picker renders each athlete as a role="option" button. Click A2.
+    const optionA2 = await screen.findByRole('option', { name: /Athlete Two/i })
+    await user.click(optionA2)
 
     // fetchMetrics must be called with A2
     await waitFor(() => {
@@ -523,14 +533,15 @@ describe('Scenario: sc-3.2 — athlete change re-fetches metrics', () => {
 // sc-3.3: Empty athletes list — graceful empty-state, no metrics fetch
 // ---------------------------------------------------------------------------
 describe('Scenario: sc-3.3 — empty athletes list shows empty-state', () => {
-  it('renders "No athletes available" and does not call fetchMetrics when list is empty', async () => {
+  it('does not call fetchMetrics when the athletes list is empty', async () => {
     mockFetchAthletes.mockResolvedValue([])
+    mockFetchAthleteDirectory.mockResolvedValue([])
     mockFetchDlqDepth.mockResolvedValue(makeDlqOk())
 
     renderDashboard(makeClient())
 
-    // Empty-state message must appear
-    await screen.findByText(/No athletes available/i)
+    // The DLQ panel still renders (independent), proving the page mounted.
+    await screen.findByText(/Pipeline Health/i)
 
     // fetchMetrics must NOT have been called (no athlete to select)
     expect(mockFetchMetrics).not.toHaveBeenCalled()

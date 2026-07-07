@@ -2,7 +2,8 @@ import { useState, useEffect } from 'react'
 import { useMetrics } from '@/hooks/useMetrics'
 import { useDlqDepth } from '@/hooks/useDlqDepth'
 import { useAthletes } from '@/hooks/useAthletes'
-import AthleteSelector from './AthleteSelector'
+import { useAthleteDirectory } from '@/hooks/useAthleteDirectory'
+import AthletePicker from './AthletePicker'
 import TrendChart from './TrendChart'
 import PipelineHealthPanel from './PipelineHealthPanel'
 import CoachingFlagsPanel from './CoachingFlagsPanel'
@@ -10,8 +11,64 @@ import Loading from './states/Loading'
 import ErrorAlert from './states/ErrorAlert'
 import Empty from './states/Empty'
 
+type Severity = 'ok' | 'info' | 'warn' | 'danger' | 'neutral'
+
+/** Higher fatigue = worse. Tune thresholds to the 0..100 scale. */
+function fatigueSeverity(score: number): Severity {
+  if (score >= 80) return 'danger'
+  if (score >= 60) return 'warn'
+  return 'ok'
+}
+
+/** Higher readiness/recovery = better. */
+function readinessSeverity(score: number): Severity {
+  if (score >= 66) return 'ok'
+  if (score >= 33) return 'warn'
+  return 'danger'
+}
+
+const SEVERITY_HINT: Record<Severity, string> = {
+  ok: 'Good',
+  info: 'Info',
+  warn: 'Caution',
+  danger: 'Alert',
+  neutral: 'No data',
+}
+
+interface ScoreCardProps {
+  label: string
+  value: string
+  severity: Severity
+}
+
+/**
+ * Presentational metric card. The full "<label>: <value>" text is preserved in
+ * a single element so accessibility (and existing getByText tests) keep working;
+ * the label/value are ALSO shown as a styled stat for the visual layout.
+ */
+function ScoreCard({ label, value, severity }: ScoreCardProps) {
+  return (
+    <div className={`score-card score-card--${severity}`}>
+      {/* Accessible + test-visible full text (visually hidden duplicate). */}
+      <p style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>
+        {label}: {value}
+      </p>
+      <div className="score-card__label" aria-hidden="true">
+        {label.replace(/ score$/i, '')}
+      </div>
+      <div className="score-card__value" aria-hidden="true">
+        {value}
+      </div>
+      <div className="score-card__hint" aria-hidden="true">
+        {SEVERITY_HINT[severity]}
+      </div>
+    </div>
+  )
+}
+
 export default function DashboardPage() {
   const athletes = useAthletes()
+  const directory = useAthleteDirectory()
 
   // Default selection: first alphabetical athlete once list loads (sc-3.1).
   // Starts empty; set by the effect below when data arrives.
@@ -56,28 +113,50 @@ export default function DashboardPage() {
         <>
           {latestRow && (
             <div aria-label="Latest load scores">
-              {latestRow.fatigue_score !== null && (
-                <p>Fatigue score: {latestRow.fatigue_score.toFixed(1)}</p>
-              )}
-              {latestRow.readiness_score !== null && (
-                <p>Readiness score: {latestRow.readiness_score.toFixed(1)}</p>
-              )}
-              <p>
-                Recovery score:{' '}
-                {latestRow.recovery_score != null
-                  ? latestRow.recovery_score.toFixed(1)
-                  : '--'}
-              </p>
-              <p>
-                Adherence score:{' '}
-                {latestRow.adherence_score != null
-                  ? latestRow.adherence_score.toFixed(1)
-                  : '–'}
-              </p>
+              <div className="scores-grid">
+                {latestRow.fatigue_score !== null && (
+                  <ScoreCard
+                    label="Fatigue score"
+                    value={latestRow.fatigue_score.toFixed(1)}
+                    severity={fatigueSeverity(latestRow.fatigue_score)}
+                  />
+                )}
+                {latestRow.readiness_score !== null && (
+                  <ScoreCard
+                    label="Readiness score"
+                    value={latestRow.readiness_score.toFixed(1)}
+                    severity={readinessSeverity(latestRow.readiness_score)}
+                  />
+                )}
+                <ScoreCard
+                  label="Recovery score"
+                  value={
+                    latestRow.recovery_score != null
+                      ? latestRow.recovery_score.toFixed(1)
+                      : '--'
+                  }
+                  severity={
+                    latestRow.recovery_score != null
+                      ? readinessSeverity(latestRow.recovery_score)
+                      : 'neutral'
+                  }
+                />
+                <ScoreCard
+                  label="Adherence score"
+                  value={
+                    latestRow.adherence_score != null
+                      ? latestRow.adherence_score.toFixed(1)
+                      : '–'
+                  }
+                  severity="neutral"
+                />
+              </div>
               <CoachingFlagsPanel coaching_flags={latestRow.coaching_flags} />
             </div>
           )}
-          <TrendChart data={metrics.data} />
+          <div className="chart-card">
+            <TrendChart data={metrics.data} />
+          </div>
         </>
       )
     }
@@ -105,12 +184,20 @@ export default function DashboardPage() {
 
   return (
     <main>
-      {/* sc-3.4: selector appears before h1 */}
-      <AthleteSelector
-        athletes={athletes.data ?? []}
+      {/* sc-3.4: picker appears before h1. Uses the rich directory (name+sport)
+          when available, falling back to plain ids from /athletes. */}
+      <AthletePicker
+        entries={
+          directory.data ??
+          (athletes.data ?? []).map((id) => ({
+            athlete_id: id,
+            name: null,
+            sport: null,
+          }))
+        }
         selected={selectedAthlete}
         onChange={setSelectedAthlete}
-        isLoading={athletes.isLoading}
+        isLoading={athletes.isLoading || directory.isLoading}
         isError={athletes.isError}
       />
       <h1>AthleteOS Dashboard</h1>

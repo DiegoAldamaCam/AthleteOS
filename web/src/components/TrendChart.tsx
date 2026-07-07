@@ -17,6 +17,47 @@ interface TrendChartProps {
   data: MetricRow[]
 }
 
+// Human-readable one-liners so the chart explains itself (no external legend
+// docs needed). Keyed by the series `name`.
+const SERIES_HELP: Record<string, string> = {
+  'Acute Load': 'Recent training load (~7-day). Short-term stress.',
+  'Chronic Load (28d)': 'Long-term fitness baseline (28-day average).',
+  ACR: 'Acute:Chronic Ratio. Sweet spot ~0.8–1.3; >1.5 = injury risk.',
+}
+
+interface TooltipEntry {
+  name?: string
+  value?: number | string | null
+  color?: string
+}
+
+/** Custom tooltip: formats numbers to 1 decimal (no 14-decimal noise). */
+function ChartTooltip({
+  active,
+  payload,
+  label,
+}: {
+  active?: boolean
+  payload?: TooltipEntry[]
+  label?: string
+}) {
+  if (!active || !payload || payload.length === 0) return null
+  return (
+    <div className="chart-tooltip">
+      <div className="chart-tooltip__date">{label}</div>
+      {payload.map((p) => {
+        const v = typeof p.value === 'number' ? p.value.toFixed(1) : p.value
+        return (
+          <div key={p.name} className="chart-tooltip__row" style={{ color: p.color }}>
+            <span className="chart-tooltip__name">{p.name}</span>
+            <span className="chart-tooltip__value">{v ?? '—'}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ACR (acute:chronic ratio) zone thresholds. These are dimensionless ratios,
 // NOT load values, so they are shaded on a dedicated right-hand ratio axis
 // ("acr"), never on the load axis. Mixing ratio thresholds with load units
@@ -72,7 +113,7 @@ export default function TrendChart({ data }: TrendChartProps) {
             tick={{ fontSize: 12 }}
           />
 
-          <Tooltip />
+          <Tooltip content={<ChartTooltip />} />
           <Legend />
 
           {/* ACR zone shading on the ratio axis — safe (<1.3), caution (1.3-1.5),
@@ -150,6 +191,17 @@ export default function TrendChart({ data }: TrendChartProps) {
           />
         </ComposedChart>
       </ResponsiveContainer>
+
+      {/* Self-documenting legend: explains what each series means so a coach can
+          read the chart without external docs. */}
+      <dl className="chart-legend">
+        {Object.entries(SERIES_HELP).map(([name, help]) => (
+          <div key={name} className="chart-legend__item">
+            <dt className="chart-legend__term">{name}</dt>
+            <dd className="chart-legend__desc">{help}</dd>
+          </div>
+        ))}
+      </dl>
     </div>
   )
 }
