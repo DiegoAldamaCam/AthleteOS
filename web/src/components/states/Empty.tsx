@@ -1,6 +1,6 @@
 export default function Empty() {
   return (
-    <div role="status">
+    <div className="state-panel" role="status">
       No training data available
     </div>
   )

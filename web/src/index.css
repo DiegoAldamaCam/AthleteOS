@@ -1,0 +1,557 @@
+/*
+ * AthleteOS global stylesheet.
+ * Imports design tokens, then styles the app shell and every component that
+ * already declares semantic classes / roles (score cards, coaching badges,
+ * pipeline health, state panels, chart container).
+ *
+ * No component logic is changed — this is the "skin" the components were built
+ * to expect (e.g. .coaching-badge, .badge-deload were referenced before any CSS
+ * existed).
+ */
+
+@import './styles/theme.css';
+
+/* ------------------------------------------------------------------ *
+ * Reset / base
+ * ------------------------------------------------------------------ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.01em;
+}
+
+p {
+  margin: 0;
+}
+
+/* ------------------------------------------------------------------ *
+ * App shell / layout
+ * ------------------------------------------------------------------ */
+
+main {
+  max-width: var(--container-max);
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) var(--space-8);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+/* Top bar: athlete selector sits above the title (sc-3.4 ordering kept). */
+main > label {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  align-self: flex-start;
+  padding: var(--space-2) var(--space-3);
+  margin: calc(-1 * var(--space-6)) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+main > h1 {
+  font-size: var(--text-3xl);
+  background: linear-gradient(
+    90deg,
+    var(--color-text) 0%,
+    var(--color-accent) 120%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* ------------------------------------------------------------------ *
+ * Form controls (athlete selector)
+ * ------------------------------------------------------------------ */
+
+select {
+  appearance: none;
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-4) var(--space-2) var(--space-3);
+  font: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  background-image: linear-gradient(45deg, transparent 50%, var(--color-text-muted) 50%),
+    linear-gradient(135deg, var(--color-text-muted) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 55%, calc(100% - 9px) 55%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+select:hover:not(:disabled) {
+  border-color: var(--color-accent);
+}
+
+select:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.25);
+}
+
+select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ------------------------------------------------------------------ *
+ * Score cards (Latest load scores)
+ * ------------------------------------------------------------------ */
+
+.scores-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-4);
+}
+
+.score-card {
+  position: relative;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-5);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.score-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+/* Left accent bar tinted by severity. */
+.score-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: var(--_accent, var(--color-neutral));
+}
+
+.score-card__label {
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.score-card__value {
+  margin-top: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-bold);
+  color: var(--color-text);
+  line-height: 1.1;
+}
+
+.score-card__hint {
+  margin-top: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--_accent, var(--color-text-faint));
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Severity theming via a single custom property. */
+.score-card--ok {
+  --_accent: var(--color-ok);
+}
+.score-card--info {
+  --_accent: var(--color-info);
+}
+.score-card--warn {
+  --_accent: var(--color-warn);
+}
+.score-card--danger {
+  --_accent: var(--color-danger);
+}
+.score-card--neutral {
+  --_accent: var(--color-neutral);
+}
+
+/* ------------------------------------------------------------------ *
+ * Coaching badges (classes referenced by CoachingFlagsPanel)
+ * ------------------------------------------------------------------ */
+
+[role='list'][aria-label='Coaching flags'] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.coaching-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.badge-deload {
+  color: var(--color-info);
+  background: var(--color-info-bg);
+  border-color: rgba(56, 189, 248, 0.35);
+}
+.badge-high-fatigue {
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
+  border-color: rgba(239, 68, 68, 0.4);
+}
+.badge-undertrained {
+  color: var(--color-warn);
+  background: var(--color-warn-bg);
+  border-color: rgba(245, 158, 11, 0.4);
+}
+.badge-monitor {
+  color: var(--color-accent-2);
+  background: rgba(168, 85, 247, 0.12);
+  border-color: rgba(168, 85, 247, 0.4);
+}
+.badge-default {
+  color: var(--color-text-muted);
+  background: var(--color-neutral-bg);
+  border-color: var(--color-border-strong);
+}
+
+/* ------------------------------------------------------------------ *
+ * Pipeline Health panel
+ * ------------------------------------------------------------------ */
+
+section[aria-label='Pipeline health'] {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+}
+
+section[aria-label='Pipeline health'] h2 {
+  font-size: var(--text-lg);
+  margin-bottom: var(--space-4);
+}
+
+section[aria-label='Pipeline health'] ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+section[aria-label='Pipeline health'] li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+/* Status dot before each topic; color set by the first span's text is not
+   possible in pure CSS, so we tint via a leading marker using ::before and the
+   OK/Warning text remains readable. A neutral dot keeps it clean. */
+section[aria-label='Pipeline health'] li::before {
+  content: '';
+  width: 9px;
+  height: 9px;
+  border-radius: var(--radius-pill);
+  background: var(--color-ok);
+  box-shadow: 0 0 8px var(--color-ok);
+  flex: none;
+}
+
+section[aria-label='Pipeline health'] li span:first-child {
+  color: var(--color-text-muted);
+}
+
+section[aria-label='Pipeline health'] li span:last-child {
+  margin-left: auto;
+  color: var(--color-text);
+  font-weight: var(--weight-semibold);
+}
+
+/* ------------------------------------------------------------------ *
+ * State panels: Loading / Empty / Error
+ * ------------------------------------------------------------------ */
+
+[role='alert'] {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-danger-bg);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: var(--radius-md);
+  color: #fca5a5;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.state-panel {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  min-height: 120px;
+  padding: var(--space-6);
+  background: var(--color-surface);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  font-size: var(--text-sm);
+}
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--color-border-strong);
+  border-top-color: var(--color-accent);
+  border-radius: var(--radius-pill);
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Chart container + self-documenting legend + custom tooltip
+ * ------------------------------------------------------------------ */
+
+.chart-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Recharts renders on an SVG; nudge its text to theme colors. */
+.chart-card text {
+  fill: var(--color-text-muted);
+}
+.chart-card .recharts-cartesian-grid line {
+  stroke: var(--color-border);
+}
+
+.chart-legend {
+  margin: var(--space-4) 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-3);
+}
+
+.chart-legend__item {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+}
+
+.chart-legend__term {
+  font-weight: var(--weight-semibold);
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  margin-bottom: var(--space-1);
+}
+
+.chart-legend__desc {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+.chart-tooltip {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+  box-shadow: var(--shadow-md);
+  font-size: var(--text-sm);
+  min-width: 180px;
+}
+
+.chart-tooltip__date {
+  font-weight: var(--weight-semibold);
+  color: var(--color-text);
+  margin-bottom: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.chart-tooltip__row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-4);
+  font-family: var(--font-mono);
+}
+
+.chart-tooltip__value {
+  font-weight: var(--weight-semibold);
+}
+
+/* ------------------------------------------------------------------ *
+ * Athlete picker (searchable + sport filter, for 1000+ athletes)
+ * ------------------------------------------------------------------ */
+
+.athlete-picker {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  box-shadow: var(--shadow-sm);
+}
+
+.athlete-picker__controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.athlete-picker__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  font-weight: var(--weight-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.athlete-picker__search {
+  flex: 1;
+  min-width: 180px;
+}
+
+.athlete-picker__field input[type='search'] {
+  appearance: none;
+  background: var(--color-bg);
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.athlete-picker__field input[type='search']:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.25);
+}
+
+.athlete-picker__count {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--color-text-faint);
+}
+
+.athlete-picker__list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.athlete-picker__item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.athlete-picker__item:hover {
+  background: var(--color-surface-raised);
+}
+
+.athlete-picker__item.is-selected {
+  background: rgba(59, 130, 246, 0.14);
+  border-color: var(--color-accent);
+}
+
+.athlete-picker__name {
+  font-weight: var(--weight-medium);
+}
+
+.athlete-picker__sport {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
