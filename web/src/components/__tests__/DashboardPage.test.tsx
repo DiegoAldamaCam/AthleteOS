@@ -14,6 +14,9 @@ vi.mock('@/api/client', () => ({
   fetchDlqDepth: vi.fn(),
   fetchAthletes: vi.fn(),
   fetchAthleteDirectory: vi.fn(),
+  fetchSportMetrics: vi.fn(),
+  fetchRiskDistribution: vi.fn(),
+  fetchSportDailyAverage: vi.fn(),
 }))
 
 // Import AFTER vi.mock so we get the mocked versions.
@@ -22,12 +25,18 @@ import {
   fetchDlqDepth,
   fetchAthletes,
   fetchAthleteDirectory,
+  fetchSportMetrics,
+  fetchRiskDistribution,
+  fetchSportDailyAverage,
 } from '@/api/client'
 
 const mockFetchMetrics = fetchMetrics as ReturnType<typeof vi.fn>
 const mockFetchDlqDepth = fetchDlqDepth as ReturnType<typeof vi.fn>
 const mockFetchAthletes = fetchAthletes as ReturnType<typeof vi.fn>
 const mockFetchAthleteDirectory = fetchAthleteDirectory as ReturnType<typeof vi.fn>
+const mockFetchSportMetrics = fetchSportMetrics as ReturnType<typeof vi.fn>
+const mockFetchRiskDistribution = fetchRiskDistribution as ReturnType<typeof vi.fn>
+const mockFetchSportDailyAverage = fetchSportDailyAverage as ReturnType<typeof vi.fn>
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -105,6 +114,10 @@ beforeEach(() => {
   mockFetchAthleteDirectory.mockResolvedValue([
     { athlete_id: 'A1', name: 'Athlete One', sport: 'running' },
   ])
+  // Analytics section loads independently; empty defaults keep it inert.
+  mockFetchSportMetrics.mockResolvedValue([])
+  mockFetchRiskDistribution.mockResolvedValue([])
+  mockFetchSportDailyAverage.mockResolvedValue([])
 })
 
 // ---------------------------------------------------------------------------
@@ -141,7 +154,7 @@ describe('Scenario: api-error — metrics fetch fails', () => {
     expect(alert.textContent).not.toBe('')
 
     // Chart container must NOT be present
-    expect(screen.queryByRole('img')).toBeNull()
+    expect(screen.queryByRole('img', { name: /training load trend/i })).toBeNull()
 
     // DLQ panel renders independently
     expect(screen.getByText(/Pipeline Health/i)).toBeInTheDocument()
@@ -162,7 +175,7 @@ describe('Scenario: empty metrics', () => {
     await screen.findByText(/No training data available/i)
 
     // Chart container must NOT be present
-    expect(screen.queryByRole('img')).toBeNull()
+    expect(screen.queryByRole('img', { name: /training load trend/i })).toBeNull()
 
     // DLQ panel renders (independent data source)
     expect(screen.getByText(/Pipeline Health/i)).toBeInTheDocument()
@@ -180,7 +193,7 @@ describe('Scenario: happy-path data binding', () => {
     renderDashboard(makeClient())
 
     // Chart container with ARIA role and label
-    const chart = await screen.findByRole('img')
+    const chart = await screen.findByRole('img', { name: /training load trend/i })
     expect(chart).toBeInTheDocument()
     expect(chart).toHaveAttribute('aria-label')
     expect(chart.getAttribute('aria-label')).not.toBe('')
@@ -238,7 +251,7 @@ describe('Scenario: sparse-gap — densified series preserves null gap', () => {
     // Behavior contract: the chart renders the sparse series without throwing
     // (it feeds densified data with null gaps into Recharts). The DOM stays in
     // the chart state — NOT the empty state — even though most dates are gaps.
-    const chart = await screen.findByRole('img')
+    const chart = await screen.findByRole('img', { name: /training load trend/i })
     expect(chart).toBeInTheDocument()
     expect(screen.queryByText(/No training data available/i)).toBeNull()
 
@@ -277,7 +290,7 @@ describe('Scenario: dlq-fetch-error — metrics renders, DLQ shows error', () =>
     renderDashboard(makeClient())
 
     // Metrics chart MUST render normally — independence contract
-    const chart = await screen.findByRole('img')
+    const chart = await screen.findByRole('img', { name: /training load trend/i })
     expect(chart).toBeInTheDocument()
     expect(chart).toHaveAttribute('aria-label')
 

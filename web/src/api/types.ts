@@ -46,6 +46,47 @@ export interface SportsResponse {
   sports: SportCount[]
 }
 
+// ---- Analytics (cross-athlete aggregation) --------------------------------
+
+export interface SportMetrics {
+  sport: string
+  athlete_count: number
+  avg_acute_load: number | null
+  avg_chronic_load: number | null
+  avg_acr: number | null
+  avg_fatigue: number | null
+  avg_readiness: number | null
+}
+
+export interface BySportResponse {
+  sports: SportMetrics[]
+}
+
+export interface SportRisk {
+  sport: string
+  safe: number
+  caution: number
+  danger: number
+  unknown: number
+}
+
+export interface RiskDistributionResponse {
+  sports: SportRisk[]
+}
+
+export interface SportDailyPoint {
+  metric_date: string
+  avg_acute_load: number | null
+  avg_chronic_load: number | null
+  avg_acr: number | null
+  athlete_count: number
+}
+
+export interface SportDailyAverageResponse {
+  sport: string
+  points: SportDailyPoint[]
+}
+
 export type DlqStatus = 'ok' | 'warning' | 'unavailable'
 
 export interface DlqTopic {

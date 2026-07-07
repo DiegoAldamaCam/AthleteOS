@@ -10,6 +10,9 @@ vi.mock('@/api/client', () => ({
   fetchDlqDepth: vi.fn(() => new Promise(() => {})),
   fetchAthletes: vi.fn(() => new Promise(() => {})),
   fetchAthleteDirectory: vi.fn(() => new Promise(() => {})),
+  fetchSportMetrics: vi.fn(() => new Promise(() => {})),
+  fetchRiskDistribution: vi.fn(() => new Promise(() => {})),
+  fetchSportDailyAverage: vi.fn(() => new Promise(() => {})),
 }))
 
 function renderWithProviders(ui: React.ReactElement) {

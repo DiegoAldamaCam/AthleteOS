@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.config import settings
-from api.routers import athletes, login, metrics, pipeline
+from api.routers import analytics, athletes, login, metrics, pipeline
 from api.observability import REGISTRY, instrument_app
 
 logger = logging.getLogger("api")
@@ -45,6 +45,7 @@ app.include_router(login.router)
 app.include_router(metrics.router)
 app.include_router(pipeline.router)
 app.include_router(athletes.router)
+app.include_router(analytics.router)
 
 # ---------------------------------------------------------------------------
 # Observability — mount /metrics ASGI app + wire PrometheusMiddleware

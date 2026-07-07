@@ -4,6 +4,12 @@ import type {
   AthletesResponse,
   AthleteDirectoryResponse,
   AthleteDirectoryEntry,
+  BySportResponse,
+  SportMetrics,
+  RiskDistributionResponse,
+  SportRisk,
+  SportDailyAverageResponse,
+  SportDailyPoint,
 } from './types'
 
 const _apiBaseRaw = import.meta.env.VITE_API_BASE_URL as string | undefined
@@ -49,4 +55,22 @@ export function fetchAthleteDirectory(): Promise<AthleteDirectoryEntry[]> {
   return apiFetch<AthleteDirectoryResponse>('/athletes/directory').then(
     (r) => r.athletes,
   )
+}
+
+export function fetchSportMetrics(): Promise<SportMetrics[]> {
+  return apiFetch<BySportResponse>('/analytics/by-sport').then((r) => r.sports)
+}
+
+export function fetchRiskDistribution(): Promise<SportRisk[]> {
+  return apiFetch<RiskDistributionResponse>('/analytics/risk-distribution').then(
+    (r) => r.sports,
+  )
+}
+
+export function fetchSportDailyAverage(
+  sport: string,
+): Promise<SportDailyPoint[]> {
+  return apiFetch<SportDailyAverageResponse>(
+    `/analytics/sport/${encodeURIComponent(sport)}/daily-average`,
+  ).then((r) => r.points)
 }

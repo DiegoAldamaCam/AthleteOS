@@ -10,11 +10,15 @@ import {
   ReferenceLine,
   ResponsiveContainer,
 } from 'recharts'
-import type { MetricRow } from '@/api/types'
+import type { MetricRow, SportDailyPoint } from '@/api/types'
 import { densifySeries } from '@/utils/densifySeries'
 
 interface TrendChartProps {
   data: MetricRow[]
+  /** Optional per-sport mean daily curve to overlay for comparison. */
+  sportAverage?: SportDailyPoint[]
+  /** Sport label for the overlay legend (e.g. "Running"). */
+  sportLabel?: string
 }
 
 // Human-readable one-liners so the chart explains itself (no external legend
@@ -66,8 +70,20 @@ const ACR_SAFE_MAX = 1.3 // ratio < 1.3  → safe
 const ACR_CAUTION_MAX = 1.5 // 1.3–1.5    → caution; > 1.5 → danger
 const ACR_AXIS_MAX = 2.0 // top of the ratio axis for zone shading
 
-export default function TrendChart({ data }: TrendChartProps) {
+export default function TrendChart({ data, sportAverage, sportLabel }: TrendChartProps) {
   const densified = densifySeries(data)
+
+  // Merge the sport mean curve onto the densified rows by date, so the overlay
+  // line aligns with the athlete's own series. Additive: absent -> no overlay.
+  const avgByDate = new Map(
+    (sportAverage ?? []).map((p) => [p.metric_date, p.avg_acute_load]),
+  )
+  const chartRows = densified.map((row) => ({
+    ...row,
+    sport_avg_acute:
+      avgByDate.get(row.metric_date) ?? null,
+  }))
+  const hasOverlay = (sportAverage?.length ?? 0) > 0
 
   // Collect deload dates for ReferenceLine markers
   const deloadDates = data
@@ -89,7 +105,7 @@ export default function TrendChart({ data }: TrendChartProps) {
     >
       <ResponsiveContainer width="100%" height={360}>
         <ComposedChart
-          data={densified}
+          data={chartRows}
           margin={{ top: 16, right: 32, left: 16, bottom: 8 }}
         >
           <CartesianGrid strokeDasharray="3 3" />
@@ -189,6 +205,22 @@ export default function TrendChart({ data }: TrendChartProps) {
             dot={false}
             connectNulls={false}
           />
+
+          {/* Optional overlay: this athlete's sport mean acute load, so a coach
+              can see if the athlete is above or below their discipline's norm. */}
+          {hasOverlay && (
+            <Line
+              yAxisId="load"
+              type="monotone"
+              dataKey="sport_avg_acute"
+              name={sportLabel ? `${sportLabel} avg (acute)` : 'Sport avg (acute)'}
+              stroke="#94a3b8"
+              strokeWidth={2}
+              strokeDasharray="6 4"
+              dot={false}
+              connectNulls
+            />
+          )}
         </ComposedChart>
       </ResponsiveContainer>
 

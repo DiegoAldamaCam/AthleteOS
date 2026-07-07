@@ -3,7 +3,9 @@ import { useMetrics } from '@/hooks/useMetrics'
 import { useDlqDepth } from '@/hooks/useDlqDepth'
 import { useAthletes } from '@/hooks/useAthletes'
 import { useAthleteDirectory } from '@/hooks/useAthleteDirectory'
+import { useSportDailyAverage } from '@/hooks/useAnalytics'
 import AthletePicker from './AthletePicker'
+import SportAnalyticsSection from './analytics/SportAnalyticsSection'
 import TrendChart from './TrendChart'
 import PipelineHealthPanel from './PipelineHealthPanel'
 import CoachingFlagsPanel from './CoachingFlagsPanel'
@@ -89,6 +91,12 @@ export default function DashboardPage() {
   const metrics = useMetrics(selectedAthlete, undefined, undefined, !!selectedAthlete)
   const dlq = useDlqDepth()
 
+  // Sport of the currently selected athlete (from the directory), used to fetch
+  // and overlay that sport's mean daily load curve on the athlete's chart.
+  const selectedSport =
+    directory.data?.find((e) => e.athlete_id === selectedAthlete)?.sport ?? null
+  const sportAverage = useSportDailyAverage(selectedSport)
+
   // Render metrics panel
   let metricsPanel: React.ReactNode = null
   if (!athletesEmpty && selectedAthlete) {
@@ -155,7 +163,15 @@ export default function DashboardPage() {
             </div>
           )}
           <div className="chart-card">
-            <TrendChart data={metrics.data} />
+            <TrendChart
+              data={metrics.data}
+              sportAverage={sportAverage.data}
+              sportLabel={
+                selectedSport
+                  ? selectedSport.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+                  : undefined
+              }
+            />
           </div>
         </>
       )
@@ -202,6 +218,7 @@ export default function DashboardPage() {
       />
       <h1>AthleteOS Dashboard</h1>
       <section aria-label="Training trend">{metricsPanel}</section>
+      <SportAnalyticsSection />
       <section aria-label="DLQ health">{dlqPanel}</section>
     </main>
   )
