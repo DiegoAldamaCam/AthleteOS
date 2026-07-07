@@ -29,10 +29,12 @@ Thumbs.db
 .env
 .env.*
 !.env.example
-# web/.env contains only non-secret dev placeholders (VITE_* build-time vars).
-# The actual secret value for VITE_API_KEY must be supplied in CI and is never
-# committed here; this tracked file holds only the placeholder for local dev.
-!web/.env
+!web/.env.example
+# web/.env is NOT tracked: it holds VITE_API_KEY, which must match the real
+# API_KEY secret at runtime. It was previously force-tracked via `!web/.env` on
+# the assumption it held only placeholders; that assumption failed and leaked a
+# real key (issue #80). VITE_API_KEY is supplied locally via web/.env (ignored)
+# or in CI via a build-arg — never committed. See web/.env.example for the shape.
 
 # Local data / warehouses (never commit data)
 warehouse/
