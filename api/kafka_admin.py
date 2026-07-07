@@ -151,10 +151,17 @@ def _depth_for_topic(
     topic_name: str,
     request_timeout: float,
 ) -> int:
-    """Return the depth (unprocessed message count) for a single DLQ topic.
+    """Return the depth (live unprocessed message count) for a single DLQ topic.
 
-    Depth = sum(end_offset per partition) - sum(committed_offset per partition).
-    No consumer group for DLQ topics → depth = total end-offset.
+    Depth = sum(latest_offset - earliest_offset) across partitions.
+
+    DLQ topics have no consumer group, so every retained message is unconsumed.
+    But they DO have retention (cleanup.policy=delete, retention.ms), so expired
+    messages are deleted and the earliest offset advances while the latest offset
+    keeps climbing. Using latest alone would report the cumulative historical
+    end-offset (messages that ever existed) instead of what is actually retained.
+    Subtracting earliest yields the true live depth (0 once everything expires).
+
     Missing topic in metadata → depth 0.
     """
     from confluent_kafka import TopicPartition
@@ -174,23 +181,36 @@ def _depth_for_topic(
         for partition_id in topic_meta.partitions.keys()
     ]
 
-    # Fetch end (latest/high-watermark) offsets
+    # Fetch both latest (high-watermark) and earliest (low-watermark) offsets so
+    # depth reflects only retained messages, not the historical cumulative count.
     end_offset_specs = {tp: OffsetSpec.latest() for tp in partitions}
+    start_offset_specs = {tp: OffsetSpec.earliest() for tp in partitions}
     end_futures = admin.list_offsets(end_offset_specs, request_timeout=request_timeout)
+    start_futures = admin.list_offsets(start_offset_specs, request_timeout=request_timeout)
 
     from confluent_kafka import OFFSET_INVALID
 
-    total_end = 0
-    for tp, future in end_futures.items():
+    # Resolve earliest offsets into a per-partition lookup keyed by (topic, partition).
+    earliest_by_tp: dict = {}
+    for tp, future in start_futures.items():
         result = future.result()  # raises on failure
         offset = result.offset
+        earliest_by_tp[(tp.topic, tp.partition)] = (
+            offset if offset != OFFSET_INVALID and offset > 0 else 0
+        )
+
+    total_depth = 0
+    for tp, future in end_futures.items():
+        result = future.result()  # raises on failure
+        latest = result.offset
         # ADR H7: explicit named guard for the OFFSET_INVALID sentinel (-1001).
         # A partition returning OFFSET_INVALID contributes 0 to depth;
         # broker_reachable remains True (the broker responded — the offset is
         # simply unavailable for this partition).
-        if offset != OFFSET_INVALID and offset > 0:
-            total_end += offset
+        if latest == OFFSET_INVALID or latest <= 0:
+            continue
+        earliest = earliest_by_tp.get((tp.topic, tp.partition), 0)
+        # Clamp per-partition so a transient earliest > latest never goes negative.
+        total_depth += max(0, latest - earliest)
 
-    # No consumer group for DLQ topics → depth = total end-offset
-    # (all messages are unconsumed — spec: "no consumer group → depth = total end-offset")
-    return max(0, total_end)
+    return max(0, total_depth)

@@ -136,15 +136,25 @@ class TestOffsetInvalidGuard:
     Design: obs #99 ADR H7 — explicit named guard in _depth_for_topic.
     """
 
-    def _make_mock_admin(self, partitions_with_offsets: dict):
+    def _make_mock_admin(self, partitions_with_offsets: dict, earliest_offsets: dict | None = None):
         """Build a minimal mock AdminClient that returns specified offsets.
 
-        partitions_with_offsets: {partition_id: offset_value}
+        partitions_with_offsets: {partition_id: latest_offset_value}
+        earliest_offsets:        {partition_id: earliest_offset_value} — defaults
+                                 to 0 for every partition (no retention deletion),
+                                 so depth == latest, matching the pre-retention
+                                 behaviour these B9/B10 sentinel tests assert.
+
+        depth is now latest - earliest per partition, so the mock must return the
+        correct offset depending on whether OffsetSpec.latest() or .earliest() was
+        requested. We detect the spec type by its class name.
+
         The topic name is hard-coded to 'dlq.canonical.training_event'.
         """
         from unittest.mock import MagicMock
 
         topic_name = "dlq.canonical.training_event"
+        earliest = earliest_offsets or {pid: 0 for pid in partitions_with_offsets}
 
         # Build fake metadata
         metadata = MagicMock()
@@ -153,13 +163,16 @@ class TestOffsetInvalidGuard:
         part_meta.partitions = {pid: MagicMock() for pid in partitions_with_offsets}
         metadata.topics = {topic_name: part_meta}
 
-        # Build fake list_offsets futures
+        # Build fake list_offsets futures. The spec value is an OffsetSpec instance;
+        # earliest vs latest is distinguished by the spec's class name.
         def _list_offsets(specs, request_timeout=5.0):
             futures = {}
-            for tp in specs:
+            for tp, spec in specs.items():
+                is_earliest = "earliest" in type(spec).__name__.lower()
+                offset_map = earliest if is_earliest else partitions_with_offsets
                 future = MagicMock()
                 result = MagicMock()
-                result.offset = partitions_with_offsets[tp.partition]
+                result.offset = offset_map[tp.partition]
                 future.result.return_value = result
                 futures[tp] = future
             return futures
@@ -196,4 +209,42 @@ class TestOffsetInvalidGuard:
 
         assert depth == 5, (
             f"Valid offset 5 + OFFSET_INVALID → depth should be 5, got {depth}"
+        )
+
+    def test_depth_subtracts_earliest_for_retention(self):
+        """Retention-aware depth: depth = latest - earliest per partition.
+
+        When retention (cleanup.policy=delete) has deleted expired messages, the
+        earliest offset advances while latest keeps climbing. Reporting latest
+        alone would inflate depth with the historical cumulative count. depth
+        must reflect only retained (live) messages.
+        """
+        from api.kafka_admin import _depth_for_topic
+
+        # p0: latest 308, earliest 308 → 0 live (fully expired, the real DLQ case)
+        # p1: latest 715, earliest 700 → 15 live
+        admin, topic_name = self._make_mock_admin(
+            {0: 308, 1: 715},
+            earliest_offsets={0: 308, 1: 700},
+        )
+        metadata = admin.list_topics.return_value
+
+        depth = _depth_for_topic(admin, metadata, topic_name, request_timeout=5.0)
+
+        assert depth == 15, (
+            f"Expected live depth 15 (0 + 15), got {depth} — earliest not subtracted?"
+        )
+
+    def test_depth_zero_when_all_messages_expired(self):
+        """The real 3950 scenario: every partition has earliest == latest → depth 0."""
+        from api.kafka_admin import _depth_for_topic
+
+        latest = {0: 308, 1: 715, 2: 482, 3: 618}
+        admin, topic_name = self._make_mock_admin(latest, earliest_offsets=dict(latest))
+        metadata = admin.list_topics.return_value
+
+        depth = _depth_for_topic(admin, metadata, topic_name, request_timeout=5.0)
+
+        assert depth == 0, (
+            f"All messages expired (earliest==latest) must give depth 0, got {depth}"
         )

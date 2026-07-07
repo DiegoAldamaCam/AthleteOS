@@ -239,8 +239,16 @@ class TestHealthReadiness:
         body = resp.json()
         assert "db" in body, f"Expected 'db' key in 503 body, got: {body}"
 
-    def test_health_503_when_kafka_probe_fails(self, health_client):
-        """B8: Kafka probe raises → HTTP 503, body contains 'kafka' key."""
+    def test_health_200_degraded_when_kafka_probe_fails(self, health_client):
+        """B8 (revised): Kafka is a SOFT readiness dep — a failing Kafka probe
+        returns HTTP 200 with the DB healthy, and reports the degraded Kafka
+        state in the body via {"kafka": "unreachable"}.
+
+        Rationale: the slim API image intentionally omits confluent_kafka and the
+        API serves all data from Postgres, so an unreachable broker must not gate
+        readiness. This relaxes the original ADR-H4 hard Kafka gate. DB remains a
+        hard dependency (see test_health_503_when_db_probe_fails).
+        """
         client, mp, main_mod = health_client
 
         mp.setattr(main_mod, "_probe_db", lambda: None)
@@ -251,6 +259,9 @@ class TestHealthReadiness:
         mp.setattr(main_mod, "_probe_kafka", _fail_kafka)
 
         resp = client.get("/health")
-        assert resp.status_code == 503, f"Expected 503, got {resp.status_code}"
+        assert resp.status_code == 200, f"Expected 200 (soft Kafka dep), got {resp.status_code}"
         body = resp.json()
-        assert "kafka" in body, f"Expected 'kafka' key in 503 body, got: {body}"
+        assert body.get("status") == "ok", f"Expected status 'ok', got: {body}"
+        assert body.get("kafka") == "unreachable", (
+            f"Expected 'kafka': 'unreachable' in degraded 200 body, got: {body}"
+        )
