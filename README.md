@@ -11,34 +11,34 @@ Nginx), Docker Compose.
 
 ```mermaid
 flowchart LR
-    subgraph Ingestion
-        CSV[/"CSV / File watchers\n(data/inbox/*)"/]
-        ING["ingestion/\nfile watcher producers"]
+    subgraph Ingestion["📥 Ingestion"]
+        CSV[/"📄 CSV / File watchers\n(data/inbox/*)"/]
+        ING["⚙️ ingestion/\nfile watcher producers"]
     end
 
-    subgraph Kafka["Kafka + Schema Registry"]
-        RAW["raw.strength · raw.cardio\nraw.wellness (6 raw topics)"]
-        SR[("Confluent\nSchema Registry\nAvro BACKWARD")]
-        CAN["canonical.training_event\ncanonical.wellness_event\ncanonical.planning_block"]
-        DLQ["dlq.canonical.*\n(JSON · AT_LEAST_ONCE)"]
+    subgraph Kafka["🟣 Kafka + Schema Registry"]
+        RAW["📨 raw.strength · raw.cardio\nraw.wellness (6 raw topics)"]
+        SR[("📋 Confluent\nSchema Registry\nAvro BACKWARD")]
+        CAN["✅ canonical.training_event\ncanonical.wellness_event\ncanonical.planning_block"]
+        DLQ["☠️ dlq.canonical.*\n(JSON · AT_LEAST_ONCE)"]
     end
 
-    subgraph Flink["Apache Flink 1.19 (PyFlink)"]
-        CF["canonicalize jobs (6 domains)\nKeyedProcessFunction\nWatermark 24h · dedup 7d TTL"]
-        MF["metrics jobs\nTumblingWindow 1d\nSlidingWindow 42d\nACR · deload_flag"]
+    subgraph Flink["🌊 Apache Flink 1.19 (PyFlink)"]
+        CF["🔧 canonicalize jobs (6 domains)\nKeyedProcessFunction\nWatermark 24h · dedup 7d TTL"]
+        MF["📊 metrics jobs\nTumblingWindow 1d\nSlidingWindow 42d\nACR · deload_flag"]
         CF -->|"DLQ side output"| DLQ
         MF -->|"late / NaN"| DLQ
     end
 
-    subgraph Storage
-        PG[("PostgreSQL\nathlete_metrics\nserving store")]
-        ICE[("Apache Iceberg\nParquet · Snappy\npartitioned by athlete+day")]
+    subgraph Storage["💾 Storage"]
+        PG[("🐘 PostgreSQL\nathlete_metrics\nserving store")]
+        ICE[("🧊 Apache Iceberg\nParquet · Snappy\npartitioned by athlete+day")]
     end
 
-    subgraph Serving
-        API["FastAPI\n(X-API-Key auth)"]
-        DUCK["DuckDB\nad-hoc analytics"]
-        SPA["React SPA\n(Vite + Nginx :80)"]
+    subgraph Serving["🚀 Serving"]
+        API["⚡ FastAPI\n(X-API-Key auth)"]
+        DUCK["🦆 DuckDB\nad-hoc analytics"]
+        SPA["⚛️ React SPA\n(Vite + Nginx :80)"]
     end
 
     CSV --> ING --> RAW
@@ -51,6 +51,20 @@ flowchart LR
     PG --> API
     ICE --> DUCK --> API
     API --> SPA
+
+    classDef ingest fill:#1e3a5f,stroke:#4a90d9,stroke-width:2px,color:#e8f0fe
+    classDef stream fill:#3d1f5c,stroke:#a86edb,stroke-width:2px,color:#f3e8fe
+    classDef flink fill:#0d4f4f,stroke:#2ec4b6,stroke-width:2px,color:#e0fbf8
+    classDef store fill:#4a3410,stroke:#e0a458,stroke-width:2px,color:#fdf3e0
+    classDef serve fill:#1f4020,stroke:#5cb85c,stroke-width:2px,color:#e8fee8
+    classDef dlq fill:#5c1a1a,stroke:#e05252,stroke-width:2px,color:#fee8e8
+
+    class CSV,ING ingest
+    class RAW,SR,CAN stream
+    class CF,MF flink
+    class PG,ICE store
+    class API,DUCK,SPA serve
+    class DLQ dlq
 ```
 
 > Full architecture with ADRs, data flow walkthrough, and design decisions: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
