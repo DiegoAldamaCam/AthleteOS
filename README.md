@@ -1,7 +1,47 @@
 # AthleteOS
 
-Real-time athlete data platform built on an event-staged architecture
-(`raw -> canonical -> stream processing -> serving -> analytical -> API/UI`).
+**A real-time training-load and injury-risk platform for athletes and coaches.**
+
+Elite and amateur athletes generate a constant stream of training data — strength
+sets, cardio sessions, wellness check-ins, nutrition, recovery, and planned
+workouts — usually scattered across disconnected apps and spreadsheets. Without a
+unified view, a coach can't answer the question that actually matters: **is this
+athlete ramping up safely, or heading toward injury or burnout?**
+
+AthleteOS ingests that raw multi-domain data, canonicalizes it into a governed
+event model, and computes the sports-science metrics used to manage training
+load in real time:
+
+- **Acute:Chronic Workload Ratio (ACR)** — the ratio of recent load (7-day) to
+  baseline load (28-day), a well-established indicator of injury risk. An ACR
+  that spikes too high means the athlete is loading faster than their body has
+  adapted to.
+- **Deload signal** — flags when an athlete is chronically overreaching
+  (`ACR > 1.3` for 3+ days → back off) or undertraining (`ACR < 0.8` → ramp up).
+- **Per-sport & per-athlete analytics** — training-load trends, risk-zone
+  distribution, and sport rankings across 1000+ athletes in 12 sports.
+
+Coaches consume these through a REST API and a dashboard SPA; the same canonical
+data lands in an analytical lakehouse for ad-hoc historical analysis.
+
+### Who it's for
+
+| User | What they get |
+|------|---------------|
+| **Coaches / S&C staff** | Real-time load monitoring and early injury-risk warnings per athlete |
+| **Athletes** | A unified view of their own training, wellness, and recovery trends |
+| **Analysts** | Ad-hoc historical queries over the full event history (Iceberg + DuckDB) |
+
+> Built as a portfolio-grade demonstration of an end-to-end streaming data
+> platform: event ingestion, schema-governed stream processing, dual serving +
+> analytical stores, and a typed API/UI — with real sports-science domain logic,
+> not a toy CRUD.
+
+---
+
+## Tech stack
+
+Event-staged architecture: `raw -> canonical -> stream processing -> serving -> analytical -> API/UI`.
 
 **Streaming & processing**
 <br>
