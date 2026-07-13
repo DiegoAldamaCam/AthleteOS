@@ -147,14 +147,28 @@ class TestEnvExampleStatic:
             "it is computed by compose from POSTGRES_PASSWORD (ADR-S1)"
         )
 
+    # Non-secret config keys whose .env.example value is a public default, not a
+    # credential. These are exempt from the 'change-me-' placeholder rule because
+    # a real placeholder would make the value invalid (e.g. a malformed URL) while
+    # exposing nothing sensitive. Secrets (keys, passwords) are NOT exempt.
+    _NON_SECRET_KEYS = frozenset({"VITE_API_BASE_URL"})
+
     def test_env_example_change_me_prefix(self, repo_root):
-        """sc-10 (values): all .env.example values must start with 'change-me-'."""
+        """sc-10 (values): all secret .env.example values must start with 'change-me-'.
+
+        Non-secret config defaults (see ``_NON_SECRET_KEYS``) are exempt: they are
+        public values (e.g. a localhost URL), not credentials to be masked.
+        """
         content = (repo_root / ".env.example").read_text(encoding="utf-8")
         for line in content.strip().splitlines():
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
             key, _, value = line.partition("=")
+            # Strip inline comments (e.g. "change-me-api-key  # copy from ...").
+            value = value.split("#", 1)[0].strip()
+            if key.strip() in self._NON_SECRET_KEYS:
+                continue
             assert value.startswith("change-me-"), (
                 f"Value for {key!r} must start with 'change-me-', got {value!r}"
             )
