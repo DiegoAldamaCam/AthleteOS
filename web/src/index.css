@@ -460,6 +460,50 @@ section[aria-label='Pipeline health'] li span:last-child {
   box-shadow: var(--shadow-sm);
 }
 
+/* Collapsed state: shows the current selection with a "Change" button. */
+.athlete-picker__selected {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.athlete-picker__selected-label {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  font-weight: var(--weight-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.athlete-picker__selected-value {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex: 1;
+  min-width: 0;
+}
+
+.athlete-picker__change {
+  margin-left: auto;
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.athlete-picker__change:hover:not(:disabled) {
+  border-color: var(--color-accent);
+}
+
+.athlete-picker__change:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .athlete-picker__controls {
   display: flex;
   flex-wrap: wrap;

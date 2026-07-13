@@ -35,6 +35,20 @@ export default function AthletePicker({
 }: AthletePickerProps) {
   const [sport, setSport] = useState<string>('all')
   const [query, setQuery] = useState<string>('')
+  // The result list is a combobox: once an athlete is picked it collapses so it
+  // doesn't occupy the screen. It re-opens via the "Change" button. Starts open
+  // only when nothing is selected yet.
+  const [isOpen, setIsOpen] = useState<boolean>(selected === '')
+
+  const selectedEntry = useMemo(
+    () => entries.find((e) => e.athlete_id === selected) ?? null,
+    [entries, selected],
+  )
+
+  function handleSelect(id: string) {
+    onChange(id)
+    setIsOpen(false)
+  }
 
   // Sport facets with counts, sorted by count desc.
   const sports = useMemo(() => {
@@ -62,6 +76,36 @@ export default function AthletePicker({
 
   if (isError) {
     return <div role="alert">Failed to load athlete list</div>
+  }
+
+  // Collapsed state: an athlete is selected and the list is closed. Show the
+  // current selection with a button to re-open the search.
+  if (!isOpen && selected !== '') {
+    return (
+      <div className="athlete-picker" aria-label="Athlete picker">
+        <div className="athlete-picker__selected">
+          <span className="athlete-picker__selected-label">Athlete</span>
+          <span className="athlete-picker__selected-value">
+            <span className="athlete-picker__name">
+              {selectedEntry?.name ?? selected}
+            </span>
+            {selectedEntry && (
+              <span className="athlete-picker__sport">
+                {prettySport(sportOf(selectedEntry))}
+              </span>
+            )}
+          </span>
+          <button
+            type="button"
+            className="athlete-picker__change"
+            disabled={isLoading}
+            onClick={() => setIsOpen(true)}
+          >
+            Change
+          </button>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -111,7 +155,7 @@ export default function AthletePicker({
                 role="option"
                 aria-selected={isSel}
                 className={`athlete-picker__item${isSel ? ' is-selected' : ''}`}
-                onClick={() => onChange(e.athlete_id)}
+                onClick={() => handleSelect(e.athlete_id)}
               >
                 <span className="athlete-picker__name">
                   {e.name ?? e.athlete_id}
