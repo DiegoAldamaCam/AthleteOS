@@ -18,6 +18,15 @@ RUN pnpm install --frozen-lockfile
 # Copy source
 COPY . .
 
+# Vite inlines VITE_* env vars at build time. They must be provided as Docker
+# build args so they are available during `pnpm build`. They are intentionally
+# scoped to this builder stage only — the nginx runner stage below never sees
+# them, so the API key does not leak into the final image environment.
+ARG VITE_API_BASE_URL
+ARG VITE_API_KEY
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+ENV VITE_API_KEY=$VITE_API_KEY
+
 # Build production bundle
 RUN pnpm build
 

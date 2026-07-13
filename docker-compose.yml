@@ -303,6 +303,13 @@ services:
     build:
       context: web
       dockerfile: Dockerfile
+      # Pass VITE_* vars as build-args so Vite can inline them at build time.
+      # Compose interpolates ${...} ONLY from the root .env (gitignored), not
+      # from any env_file. Keep root .env values in sync with web/.env. Values
+      # are not hardcoded here so the API key stays out of version control.
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+        VITE_API_KEY: ${VITE_API_KEY}
     profiles: ["serve"]
     depends_on:
       fastapi:
