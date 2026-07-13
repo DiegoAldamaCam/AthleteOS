@@ -268,6 +268,110 @@ Integration tests use a Redpanda container (Kafka + Schema Registry compatible) 
 
 ---
 
+## System Overview — Services & Technology
+
+A bird's-eye view of every service, application, and tool in the platform, grouped by role. Unlike the data-flow diagram above (which traces an event through the pipeline), this map answers "what runs, and what is it built with?".
+
+```mermaid
+flowchart TB
+    subgraph Infra["🟣 Streaming Infrastructure"]
+        K["Apache Kafka\nconfluentinc/cp-kafka:7.6.1\nevent backbone"]
+        SR["Schema Registry\ncp-schema-registry:7.6.1\nAvro contract governance"]
+        FJM["Flink JobManager\nApache Flink 1.19 (PyFlink)\ncoordinator"]
+        FTM["Flink TaskManager\nstream processing workers"]
+    end
+
+    subgraph Compute["🌊 Stream Jobs (PyFlink)"]
+        CANJ["6 canonicalize jobs\nraw → canonical"]
+        METJ["3 metrics jobs\nACR · deload · adherence"]
+        BOOT["schema-bootstrap\none-shot topic + schema setup"]
+        INGP["ingestion producers\nCSV → raw.* topics"]
+    end
+
+    subgraph Data["💾 Storage Layer"]
+        PGS["PostgreSQL 16\nserving store (OLTP)"]
+        ICEB["Apache Iceberg 0.7.1\nParquet analytical store"]
+        DDB["DuckDB\nembedded query engine"]
+    end
+
+    subgraph App["🚀 Application Layer"]
+        BE["FastAPI + Uvicorn\nREST API · X-API-Key · JWT"]
+        FE["React 18 + Vite 5\nTanStack Query · Recharts\nReact Router"]
+        NGX["Nginx\nSPA host :80"]
+    end
+
+    subgraph Ops["📈 Observability"]
+        PROM["Prometheus v2.52\nmetrics scraping"]
+        GRAF["Grafana 10.4\ndashboards"]
+    end
+
+    subgraph Quality["🧪 Testing & Tooling"]
+        PT["pytest\n76 unit + 27 integration"]
+        TC["testcontainers\nRedpanda + Postgres"]
+        VT["Vitest + Testing Library\nfrontend suite"]
+        LINT["ruff · mypy · ESLint · Prettier · tsc"]
+        CI["GitHub Actions\n3-job CI pipeline"]
+    end
+
+    K --- SR
+    FJM --- FTM
+    INGP --> K
+    CANJ --> K
+    METJ --> K
+    METJ --> PGS
+    METJ --> ICEB
+    ICEB --- DDB
+    BE --- PGS
+    BE --- DDB
+    FE --- NGX
+    BE -.exposes /metrics.-> PROM
+    PROM --> GRAF
+
+    classDef infra fill:#3d1f5c,stroke:#a86edb,color:#f3e8fe
+    classDef compute fill:#0d4f4f,stroke:#2ec4b6,color:#e0fbf8
+    classDef data fill:#4a3410,stroke:#e0a458,color:#fdf3e0
+    classDef app fill:#1f4020,stroke:#5cb85c,color:#e8fee8
+    classDef ops fill:#1e3a5f,stroke:#4a90d9,color:#e8f0fe
+    classDef quality fill:#4a1f3d,stroke:#d96eb0,color:#fee8f6
+
+    class K,SR,FJM,FTM infra
+    class CANJ,METJ,BOOT,INGP compute
+    class PGS,ICEB,DDB data
+    class BE,FE,NGX app
+    class PROM,GRAF ops
+    class PT,TC,VT,LINT,CI quality
+```
+
+### Technology Stack (pinned versions)
+
+| Layer | Technology | Version | Role |
+|-------|-----------|---------|------|
+| **Streaming** | Apache Kafka (Confluent) | cp-kafka 7.6.1 | Event backbone, 12 topics |
+| | Confluent Schema Registry | 7.6.1 | Avro schema governance (BACKWARD compat) |
+| | Apache Flink (PyFlink) | 1.19.x | Stateful stream processing |
+| **Storage** | PostgreSQL | 16 | Low-latency serving store |
+| | Apache Iceberg | 0.7.1 (pyiceberg) | Columnar analytical store (Parquet) |
+| | DuckDB | 0.10.x | Embedded ad-hoc query engine |
+| **Backend** | FastAPI + Uvicorn | 0.110+ / 0.29+ | REST API, X-API-Key + JWT auth |
+| | Pydantic Settings | 2.x | Typed config |
+| | confluent-kafka / fastavro | 2.5+ / 1.9+ | Kafka client + Avro (de)serialization |
+| **Frontend** | React | 18.3 | SPA |
+| | Vite | 5.x | Build tool + dev server |
+| | TanStack Query | 5.x | Server-state / data fetching |
+| | Recharts | 2.x | Charts |
+| | React Router | 6.x | Routing |
+| | Nginx | alpine | Static SPA host (:80) |
+| **Observability** | Prometheus | v2.52 | Metrics scraping |
+| | Grafana | 10.4.2 | Dashboards |
+| **Testing** | pytest + testcontainers | 8.x / 4.7+ | 76 unit + 27 integration (Redpanda + Postgres) |
+| | Vitest + Testing Library | 3.x / 16.x | Frontend tests |
+| **Tooling** | ruff, mypy, ESLint, Prettier, TypeScript | — | Lint / type-check / format |
+| | Docker Compose | 6 profiles | Local orchestration (11 services) |
+| | GitHub Actions | — | 3-job CI (unit / integration / frontend) |
+| | Python | 3.11 (pinned) | PyFlink wheel window |
+
+---
+
 ## Repository Layout
 
 ```

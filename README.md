@@ -67,7 +67,7 @@ flowchart LR
     class DLQ dlq
 ```
 
-> Full architecture with ADRs, data flow walkthrough, and design decisions: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+> Full architecture with ADRs, data flow walkthrough, a system-wide services map, and the pinned technology stack: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
 ## Repository layout
 
