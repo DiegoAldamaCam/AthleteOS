@@ -7,6 +7,54 @@ Stack: Python 3.11, Apache Kafka, Confluent Schema Registry, Apache Flink
 (PyFlink), Apache Iceberg (Parquet), PostgreSQL, DuckDB, FastAPI, React (Vite +
 Nginx), Docker Compose.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Ingestion
+        CSV[/"CSV / File watchers\n(data/inbox/*)"/]
+        ING["ingestion/\nfile watcher producers"]
+    end
+
+    subgraph Kafka["Kafka + Schema Registry"]
+        RAW["raw.strength · raw.cardio\nraw.wellness (6 raw topics)"]
+        SR[("Confluent\nSchema Registry\nAvro BACKWARD")]
+        CAN["canonical.training_event\ncanonical.wellness_event\ncanonical.planning_block"]
+        DLQ["dlq.canonical.*\n(JSON · AT_LEAST_ONCE)"]
+    end
+
+    subgraph Flink["Apache Flink 1.19 (PyFlink)"]
+        CF["canonicalize jobs (6 domains)\nKeyedProcessFunction\nWatermark 24h · dedup 7d TTL"]
+        MF["metrics jobs\nTumblingWindow 1d\nSlidingWindow 42d\nACR · deload_flag"]
+        CF -->|"DLQ side output"| DLQ
+        MF -->|"late / NaN"| DLQ
+    end
+
+    subgraph Storage
+        PG[("PostgreSQL\nathlete_metrics\nserving store")]
+        ICE[("Apache Iceberg\nParquet · Snappy\npartitioned by athlete+day")]
+    end
+
+    subgraph Serving
+        API["FastAPI\n(X-API-Key auth)"]
+        DUCK["DuckDB\nad-hoc analytics"]
+        SPA["React SPA\n(Vite + Nginx :80)"]
+    end
+
+    CSV --> ING --> RAW
+    RAW --> CF
+    SR -->|"schema validation"| CF
+    CF -->|"Avro · EXACTLY_ONCE"| CAN
+    CAN --> MF
+    MF -->|"UPSERT · AT_LEAST_ONCE"| PG
+    MF -->|"append-only"| ICE
+    PG --> API
+    ICE --> DUCK --> API
+    API --> SPA
+```
+
+> Full architecture with ADRs, data flow walkthrough, and design decisions: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+
 ## Repository layout
 
 ```
