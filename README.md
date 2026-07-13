@@ -3,9 +3,45 @@
 Real-time athlete data platform built on an event-staged architecture
 (`raw -> canonical -> stream processing -> serving -> analytical -> API/UI`).
 
-Stack: Python 3.11, Apache Kafka, Confluent Schema Registry, Apache Flink
-(PyFlink), Apache Iceberg (Parquet), PostgreSQL, DuckDB, FastAPI, React (Vite +
-Nginx), Docker Compose.
+**Streaming & processing**
+<br>
+![Apache Kafka](https://img.shields.io/badge/Apache_Kafka-7.6.1-231F20?logo=apachekafka&logoColor=white)
+![Apache Flink](https://img.shields.io/badge/Apache_Flink_(PyFlink)-1.19-E6526F?logo=apacheflink&logoColor=white)
+![Schema Registry](https://img.shields.io/badge/Confluent_Schema_Registry-7.6.1-0074A2?logo=apachekafka&logoColor=white)
+![Apache Avro](https://img.shields.io/badge/Apache_Avro-fastavro-1A73E8?logo=apache&logoColor=white)
+
+**Storage**
+<br>
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Apache Iceberg](https://img.shields.io/badge/Apache_Iceberg-0.7.1-1E90FF?logo=apache&logoColor=white)
+![DuckDB](https://img.shields.io/badge/DuckDB-0.10-FFF000?logo=duckdb&logoColor=black)
+
+**Backend**
+<br>
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?logo=fastapi&logoColor=white)
+![Pydantic](https://img.shields.io/badge/Pydantic-2.x-E92063?logo=pydantic&logoColor=white)
+
+**Frontend**
+<br>
+![React](https://img.shields.io/badge/React-18.3-61DAFB?logo=react&logoColor=black)
+![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.5-3178C6?logo=typescript&logoColor=white)
+![TanStack Query](https://img.shields.io/badge/TanStack_Query-5-FF4154?logo=reactquery&logoColor=white)
+![Nginx](https://img.shields.io/badge/Nginx-alpine-009639?logo=nginx&logoColor=white)
+
+**Observability & Ops**
+<br>
+![Prometheus](https://img.shields.io/badge/Prometheus-v2.52-E6522C?logo=prometheus&logoColor=white)
+![Grafana](https://img.shields.io/badge/Grafana-10.4-F46800?logo=grafana&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker_Compose-6_profiles-2496ED?logo=docker&logoColor=white)
+![GitHub Actions](https://img.shields.io/badge/CI-GitHub_Actions-2088FF?logo=githubactions&logoColor=white)
+
+**Testing**
+<br>
+![pytest](https://img.shields.io/badge/pytest-76_unit_+_27_integration-0A9EDC?logo=pytest&logoColor=white)
+![Vitest](https://img.shields.io/badge/Vitest-frontend-6E9F18?logo=vitest&logoColor=white)
+![Testcontainers](https://img.shields.io/badge/Testcontainers-Redpanda_+_Postgres-291A66?logo=docker&logoColor=white)
 
 ## Architecture
 
